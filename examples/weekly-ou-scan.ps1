@@ -143,6 +143,7 @@ if ($StateFile -and (Test-Path -LiteralPath $StateFile)) {
 }
 
 $reuseTaskId = ''
+$script:reuseTargetId = ''
 if ($state) {
     # Import-PowerShellDataFile returns a hashtable; ContainsKey keeps this safe under StrictMode
     # and tolerant of a state file written by an older version.
@@ -195,6 +196,9 @@ if ($state) {
                 }
                 else {
                     $reuseTaskId = $prevTask
+                    # Remember the existing target so the run summary can report it. Otherwise a
+                    # reuse run prints an empty Target field, which reads like something failed.
+                    $script:reuseTargetId = $tgtNode.Value
                     Write-Host "  host set unchanged and recorded task verified; reusing task $reuseTaskId"
                 }
             }
@@ -210,7 +214,7 @@ if ($state) {
 
 $stamp = '{0:yyyyMMdd-HHmmss}' -f (Get-Date)
 $script:taskId = ''
-$script:targetId = ''
+$script:targetId = if ($script:reuseTargetId) { $script:reuseTargetId } else { '' }
 
 $result = Invoke-GvmJitScan -Identity $Identity -CredentialId $CredentialId `
     -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `

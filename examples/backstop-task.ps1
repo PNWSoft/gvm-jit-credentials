@@ -40,6 +40,14 @@ Import-Module $ModulePath -Force
 $cfg = Import-PowerShellDataFile -Path $ConfigPath
 
 # -Strict: here we DO want a throw, so the scheduled task reports failure.
-Revoke-GvmScanCredential -Identity $cfg.Identity -CredentialId $cfg.CredentialId `
+# Assigned rather than left on the pipeline: emitting the result object dumps a Format-List with
+# blank lines into the task log, burying the event lines that actually matter.
+$r = Revoke-GvmScanCredential -Identity $cfg.Identity -CredentialId $cfg.CredentialId `
     -ScannerHost $cfg.ScannerHost -GmpHelper $cfg.GmpHelper -IdentityFile $cfg.IdentityFile `
     -Strict
+
+"Backstop revoke for '$($r.Identity)' via $($r.Server)"
+"  disabled         : $($r.Disabled)"
+"  passwordReset    : $($r.PasswordReset)"
+"  greenboneBlanked : $($r.GreenboneBlanked)"
+if ($r.Warnings.Count -gt 0) { $r.Warnings | ForEach-Object { "  warning: $_" } }

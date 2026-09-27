@@ -19,6 +19,16 @@
     * with -IncludeFailed, failed logons (4625), which may indicate the stale password being
       replayed after revocation -- expected occasionally, interesting in volume.
 
+  WHICH SIGNAL ACTUALLY MATTERS. Measured on a live deployment: one day's scanning of seven hosts
+  produced 5608 type 3 logons, because every NVT check opens its own SMB session. Volume inside the
+  scan window is therefore meaningless -- a handful of malicious logons would vanish in it. The two
+  signals worth alerting on are LOGON TYPE (anything other than type 3 means the credential is being
+  used as a general-purpose account) and, with -ScanWindowCheck, type 3 logons OUTSIDE the window.
+  Treat -ScanWindowCheck as the primary detection rather than an optional extra.
+
+  COST. On a busy Security log, -Hours 24 took over seven minutes. Keep -Hours close to your check
+  interval; a monitoring system polling every five minutes cannot afford a 24-hour query.
+
   Emits Nagios/PRTG-style output and exit code: 0 = OK, 2 = CRITICAL, 3 = UNKNOWN.
 
   Reads the Security log, so it must run where the events actually land. IMPORTANT: a type 3
