@@ -49,17 +49,21 @@ function Invoke-GmpRequest {
     $ErrorActionPreference = 'Continue'
     try {
         $response = $Xml | & ssh @sshArgs 2>$errFile
-        $sshExit  = $LASTEXITCODE
+        # Under Set-StrictMode -Version Latest, reading $LASTEXITCODE before anything has set it
+        # THROWS. That happens for real when ssh is not on PATH, so the caller would get an opaque
+        # StrictMode error instead of being told ssh is missing.
+        $sshExit = if (Test-Path -LiteralPath 'Variable:LASTEXITCODE') { $LASTEXITCODE } else { 'unknown' }
     } finally {
         $ErrorActionPreference = $prev
     }
 
     $stderr = ''
     if (Test-Path -LiteralPath $errFile) {
-        $stderr = [string](Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+        $raw = Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $raw) { $stderr = [string]$raw }
         Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
     }
-    $stderr = $stderr.Trim()
+    if ($stderr) { $stderr = $stderr.Trim() }
 
     $text = [string]$response
     if ([string]::IsNullOrWhiteSpace($text)) {

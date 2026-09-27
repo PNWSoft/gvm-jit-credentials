@@ -20,10 +20,16 @@ function Set-JitAccountPassword {
     param(
         [Parameter(Mandatory)][string]$Identity,
         [Parameter(Mandatory)][string]$Password,
-        [Parameter(Mandatory)][string]$Server
+        # See Set-JitAccountEnabled: empty means "let the AD cmdlets discover a DC".
+        [AllowEmptyString()][string]$Server = ''
     )
     Assert-JitAdModule
-    Set-ADAccountPassword -Identity $Identity -Reset `
-        -NewPassword (ConvertTo-SecureString $Password -AsPlainText -Force) `
-        -Server $Server -ErrorAction Stop
+    $p = @{
+        Identity    = $Identity
+        Reset       = $true
+        NewPassword = (ConvertTo-SecureString $Password -AsPlainText -Force)
+        ErrorAction = 'Stop'
+    }
+    if ($Server) { $p['Server'] = $Server }
+    Set-ADAccountPassword @p
 }

@@ -1,0 +1,189 @@
+#requires -Modules Pester
+
+<#
+  Regression tests for defects found in review. Each one FAILS against the code as originally
+  written, which is the only thing that makes it worth having. The pre-existing suite passed 33/33
+  on the broken code, so coverage counts for nothing on its own.
+#>
+
+BeforeAll {
+    $ModulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psm1'
+    Import-Module $ModulePath -Force
+}
+
+Describe 'Revoke does not hand Greenbone a working password' {
+    BeforeEach {
+        Mock -ModuleName GvmJitCredential Resolve-JitDomainController { 'dc1.example.local' }
+        Mock -ModuleName GvmJitCredential Set-JitAccountEnabled {}
+        Mock -ModuleName GvmJitCredential Write-JitLog {}
+
+        # Capture what goes to AD and what goes to Greenbone, so they can be compared.
+        $script:adPassword = $null
+        $script:gmpBody = $null
+        Mock -ModuleName GvmJitCredential Set-JitAccountPassword { $script:adPassword = $Password }
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest {
+            $script:gmpBody = $Xml
+            [xml]'<modify_credential_response status="200"/>'
+        }
+    }
+
+    It 'pushes a DIFFERENT value to Greenbone than the one it wrote to AD' {
+        # THE defect: reusing the AD value left Greenbone holding the account's current valid
+        # password, so the only thing stopping its use was the account being disabled -- one layer,
+        # not two, and exactly the standing-credential problem the module claims to remove.
+        $null = Revoke-GvmScanCredential -Identity 'scan-acct' -CredentialId 'cred-1' `
+                    -ScannerHost 'scanner@host' -GmpHelper '/opt/gvm/gmp.sh'
+
+        $script:adPassword | Should -Not -BeNullOrEmpty
+        $script:gmpBody    | Should -Not -BeNullOrEmpty
+        $script:gmpBody    | Should -Not -Match ([regex]::Escape($script:adPassword))
+    }
+
+    It 'does not treat a failed Greenbone overwrite as an error, because the AD reset already invalidated it' {
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'scanner unreachable' }
+        $r = Revoke-GvmScanCredential -Identity 'scan-acct' -CredentialId 'cred-1' `
+                -ScannerHost 'scanner@host' -GmpHelper '/opt/gvm/gmp.sh'
+        $r.PasswordReset    | Should -BeTrue
+        $r.GreenboneBlanked | Should -BeFalse
+        $r.Warnings.Count   | Should -BeGreaterThan 0
+        $r.Errors.Count     | Should -Be 0
+    }
+
+    It '-Strict does not throw when only the Greenbone overwrite failed' {
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'scanner unreachable' }
+        { Revoke-GvmScanCredential -Identity 'scan-acct' -CredentialId 'cred-1' `
+              -ScannerHost 'scanner@host' -GmpHelper '/opt/gvm/gmp.sh' -Strict } | Should -Not -Throw
+    }
+
+    It '-Strict DOES throw when the AD password reset failed' {
+        Mock -ModuleName GvmJitCredential Set-JitAccountPassword { throw 'access denied' }
+        { Revoke-GvmScanCredential -Identity 'scan-acct' -Strict } | Should -Throw '*Revoke incomplete*'
+    }
+
+    It 'omits -Server rather than passing an empty string when the PDC cannot be resolved' {
+        # $env:USERDNSDOMAIN is unset under a gMSA-run scheduled task; -Server '' threw a binding
+        # error on every step, silently unless -Strict.
+        Mock -ModuleName GvmJitCredential Resolve-JitDomainController { throw 'no DC' }
+        { Revoke-GvmScanCredential -Identity 'scan-acct' } | Should -Not -Throw
+        Should -Invoke -ModuleName GvmJitCredential Set-JitAccountEnabled -Times 1 -Exactly
+    }
+}
+
+Describe 'Grant leaves nothing enabled when it fails' {
+    BeforeEach {
+        Mock -ModuleName GvmJitCredential Resolve-JitDomainController { 'dc1.example.local' }
+        Mock -ModuleName GvmJitCredential Write-JitLog {}
+        Mock -ModuleName GvmJitCredential Set-JitAccountEnabled {}
+        Mock -ModuleName GvmJitCredential Set-JitAccountPassword {}
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { [xml]'<r status="200"/>' }
+
+        $common = @{
+            Identity     = 'scan-acct'
+            CredentialId = 'cred-1'
+            ScannerHost  = 'scanner@host'
+            GmpHelper    = '/opt/gvm/gmp.sh'
+        }
+    }
+
+    It 'disables the account again when the Greenbone push is rejected' {
+        # Previously: the account was enabled, the push threw, and the exception propagated with the
+        # account still ENABLED and no grant record for the caller to clean up from.
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'GMP modify_credential failed: status=400' }
+        { Grant-GvmScanCredential @common } | Should -Throw '*status=400*'
+        Should -Invoke -ModuleName GvmJitCredential Set-JitAccountEnabled -Times 1 -Exactly `
+            -ParameterFilter { $Enabled -eq $false }
+    }
+
+    It 'disables the account again when the AD password reset fails' {
+        Mock -ModuleName GvmJitCredential Set-JitAccountPassword { throw 'access denied' }
+        { Grant-GvmScanCredential @common } | Should -Throw '*access denied*'
+        Should -Invoke -ModuleName GvmJitCredential Set-JitAccountEnabled -Times 1 -Exactly `
+            -ParameterFilter { $Enabled -eq $false }
+    }
+
+    It 'still surfaces the original error if the rollback itself fails' {
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'the real cause' }
+        Mock -ModuleName GvmJitCredential Set-JitAccountEnabled {
+            if ($Enabled -eq $false) { throw 'rollback failed too' }
+        }
+        { Grant-GvmScanCredential @common } | Should -Throw '*the real cause*'
+    }
+}
+
+Describe 'Invoke-GvmJitScan survives a failing Grant' {
+    BeforeEach {
+        Mock -ModuleName GvmJitCredential Write-JitLog {}
+        Mock -ModuleName GvmJitCredential Start-Sleep {}
+        Mock -ModuleName GvmJitCredential Revoke-GvmScanCredential {
+            [pscustomobject]@{ Disabled = $true; PasswordReset = $true; Errors = @(); Warnings = @() }
+        }
+
+        $common = @{
+            Identity     = 'scan-acct'
+            CredentialId = 'cred-1'
+            ScannerHost  = 'scanner@host'
+            GmpHelper    = '/opt/gvm/gmp.sh'
+            PollSeconds  = 0
+        }
+    }
+
+    It 'propagates a Grant failure without throwing from the finally block' {
+        # Grant used to be called OUTSIDE the try, so a throw skipped the finally entirely. Moving it
+        # inside means the finally runs -- and must cope with $grant being null.
+        Mock -ModuleName GvmJitCredential Grant-GvmScanCredential { throw 'scanner unreachable' }
+        { Invoke-GvmJitScan @common -TaskId 'task-1' } | Should -Throw '*scanner unreachable*'
+    }
+}
+
+Describe 'Invoke-GmpRequest' {
+    # The only real parsing and status logic in the module, and it had no tests at all.
+    BeforeEach { Mock -ModuleName GvmJitCredential Write-JitLog {} }
+
+    It 'rejects a response whose status is not expected' {
+        InModuleScope GvmJitCredential {
+            function ssh { '<modify_credential_response status="400" status_text="Bogus"/>' }
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'h' -GmpHelper '/g' } |
+                Should -Throw '*status=400*'
+        }
+    }
+
+    It 'accepts a status listed in -ExpectStatus' {
+        InModuleScope GvmJitCredential {
+            function ssh { '<start_task_response status="202"/>' }
+            $d = Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'h' -GmpHelper '/g' -ExpectStatus @('200','202')
+            $d.DocumentElement.GetAttribute('status') | Should -Be '202'
+        }
+    }
+
+    It 'is not fooled by a nested element carrying status 200' {
+        InModuleScope GvmJitCredential {
+            # Regex-matching the raw text for status="200" would read this as success.
+            function ssh { '<get_tasks_response status="400" status_text="Failed"><note>status="200"</note></get_tasks_response>' }
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'h' -GmpHelper '/g' } |
+                Should -Throw '*status=400*'
+        }
+    }
+
+    It 'reports unparseable output rather than pretending it succeeded' {
+        InModuleScope GvmJitCredential {
+            function ssh { 'docker: command not found' }
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'h' -GmpHelper '/g' } |
+                Should -Throw '*unparseable*'
+        }
+    }
+
+    It 'names the ssh failure when there is no output at all' {
+        InModuleScope GvmJitCredential {
+            function ssh { $global:LASTEXITCODE = 255; '' }
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'h' -GmpHelper '/g' } |
+                Should -Throw '*No response from the GMP helper*'
+        }
+    }
+
+    It 'fails fast on a missing IdentityFile instead of an opaque ssh error' {
+        InModuleScope GvmJitCredential {
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'h' -GmpHelper '/g' -IdentityFile 'C:\nope\missing_key' } |
+                Should -Throw '*IdentityFile not found*'
+        }
+    }
+}

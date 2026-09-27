@@ -29,8 +29,11 @@ This module makes that credential valid only while a scan is running.
 
 **What this fixes**
 
-- No standing usable password in the scanner database. Extracting it between scans yields a value
-  that authenticates nowhere.
+- No standing usable password in the scanner database. Between scans Greenbone holds a value that
+  was never set in AD, so extracting it yields a password that authenticates nowhere — independently
+  of the account also being disabled. (Getting this wrong is easy: reusing the value written to AD
+  during revoke would leave the scanner holding the account's *current* password, collapsing the two
+  layers into one. `tests/Regression.Tests.ps1` pins it.)
 - No standing enabled account. Between scans the AD account is disabled, so the credential fails
   even if the password were somehow correct. Two independent layers.
 - A tampered scheduled task fails closed rather than escalating, when combined with

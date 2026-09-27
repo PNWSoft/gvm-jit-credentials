@@ -14,9 +14,12 @@ function Set-JitAccountEnabled {
     param(
         [Parameter(Mandatory)][string]$Identity,
         [Parameter(Mandatory)][bool]$Enabled,
-        [Parameter(Mandatory)][string]$Server
+        # Optional and allowed to be empty: an empty value means "let the AD cmdlets discover a DC".
+        # Passing -Server '' through would throw a binding error, so it is omitted instead.
+        [AllowEmptyString()][string]$Server = ''
     )
     Assert-JitAdModule
-    if ($Enabled) { Enable-ADAccount  -Identity $Identity -Server $Server -ErrorAction Stop }
-    else          { Disable-ADAccount -Identity $Identity -Server $Server -ErrorAction Stop }
+    $p = @{ Identity = $Identity; ErrorAction = 'Stop' }
+    if ($Server) { $p['Server'] = $Server }
+    if ($Enabled) { Enable-ADAccount @p } else { Disable-ADAccount @p }
 }

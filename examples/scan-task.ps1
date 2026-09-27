@@ -10,9 +10,13 @@
 
   Register with (adjust paths, account and schedule):
 
+    # -Command, NOT -File. With -File, everything after the script path is passed to the script
+    # as arguments and '*>' is never parsed as redirection: the task fails with
+    # "A positional parameter cannot be found that accepts argument '*>'" and writes no log.
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-        '-NoProfile -ExecutionPolicy AllSigned -File "C:\GvmJit\examples\scan-task.ps1" ' +
-        '-ConfigPath "C:\GvmJit\config.psd1" *> "C:\GvmJit\scan-last-run.log"')
+        '-NoProfile -ExecutionPolicy AllSigned -Command ' +
+        '"& ''C:\GvmJit\examples\scan-task.ps1'' -ConfigPath ''C:\GvmJit\config.psd1'' ' +
+        '*> ''C:\GvmJit\scan-last-run.log''"')
     Register-ScheduledTask -TaskName 'GVM JIT scan' -Action $action `
         -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 01:00) `
         -Principal (New-ScheduledTaskPrincipal -UserId 'EXAMPLE\gvm-runner$' -LogonType Password -RunLevel Limited)
@@ -44,6 +48,7 @@ $result = Invoke-GvmJitScan -Identity $cfg.Identity -CredentialId $cfg.Credentia
 "Report id   : $($result.ReportId)"
 "Duration    : $($result.Duration)"
 "Revoked     : disabled=$($result.Revoke.Disabled) passwordReset=$($result.Revoke.PasswordReset)"
+if ($result.Revoke.Warnings.Count -gt 0) { $result.Revoke.Warnings | ForEach-Object { Write-Warning $_ } }
 
 # Make the task's exit code mean something, rather than leaving it to inference.
 if ($result.Revoke.Errors.Count -gt 0) {

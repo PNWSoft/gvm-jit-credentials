@@ -31,7 +31,7 @@ jobs:
               Write-Host "FAIL $($_.FullName):$($e[0].Extent.StartLineNumber) $($e[0].Message)"
             }
           }
-          Write-Host "$PSVersionTable.PSVersion -- $bad file(s) failed to parse"
+          Write-Host "$($PSVersionTable.PSVersion) -- $bad file(s) failed to parse"
           if ($bad -gt 0) { exit 1 }
 
       - name: Validate module manifest
@@ -85,23 +85,27 @@ jobs:
         # Status: Valid and then fails to parse. .gitattributes enforces this on checkout; this
         # step makes a regression a build failure rather than a mystery months later.
         run: |
-          # Counting CR bytes against LF bytes. A regex like (?<!\r)\n cannot work here: grep
-          # strips the trailing newline before matching, so the pattern never fires and the gate
-          # silently passes everything. Verified against known-LF and known-CRLF fixtures.
+          # Checking the ATTRIBUTE, not the checked-out bytes. `text eol=crlf` forces CRLF on
+          # checkout on every platform, so inspecting the working tree can only ever say "yes" --
+          # the previous version of this gate could not fail. What can regress is a PowerShell file
+          # that is not covered by the attribute, or an index entry with mixed endings.
           bad=0
           while IFS= read -r f; do
-            [ -s "$f" ] || continue
-            cr=$(tr -dc '\r' < "$f" | wc -c)
-            lf=$(tr -dc '\n' < "$f" | wc -c)
-            if [ "$cr" -ne "$lf" ]; then echo "not CRLF ($cr CR vs $lf LF): $f"; bad=1; fi
+            attr=$(git check-attr eol -- "$f" | sed 's/.*: //')
+            if [ "$attr" != "crlf" ]; then echo "eol attribute is '$attr', expected 'crlf': $f"; bad=1; fi
           done < <(git ls-files '*.ps1' '*.psm1' '*.psd1')
-          [ "$bad" -eq 0 ] || { echo 'PowerShell files must use CRLF; see .gitattributes'; exit 1; }
+          if git ls-files --eol -- '*.ps1' '*.psm1' '*.psd1' | grep -q 'i/mixed'; then
+            echo 'index contains mixed line endings:'
+            git ls-files --eol -- '*.ps1' '*.psm1' '*.psd1' | grep 'i/mixed'
+            bad=1
+          fi
+          [ "$bad" -eq 0 ] || { echo 'PowerShell files must be covered by eol=crlf; see .gitattributes'; exit 1; }
 
       - name: No environment-specific values committed
         run: |
           # The ':!' pathspec excludes this workflow from its own search: it necessarily
           # contains the patterns it looks for and would fail every run otherwise.
-          if git grep -inE 'pnwsoft|REDACTED-ADDRESSES|REDACTED-HOST|greenbone-task|REDACTED-USER' -- \
+          if git grep -inE 'REDACTED-ADDRESSES|REDACTED-HOST|REDACTED-ACCOUNT|REDACTED-USER' -- \
                '*.ps1' '*.psm1' '*.psd1' '*.sh' '*.md' '*.yml' ':!.github/workflows/ci.yml'; then
             echo 'Environment-specific values must not be committed'; exit 1
           fi

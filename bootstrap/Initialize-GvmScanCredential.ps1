@@ -85,7 +85,8 @@ if ($existing) {
 elseif ($PSCmdlet.ShouldProcess($CredentialName, 'Create Greenbone credential')) {
     # Random placeholder: Grant-GvmScanCredential replaces it before every scan.
     $placeholder = & $module { New-EphemeralPassword -Length 24 }
-    $esc = & $module { param($t) ConvertTo-GmpText $t }
+    # '& $module { ... }' INVOKES the block; it must be wrapped to stay callable.
+    $esc = { param($t) & $module { param($x) ConvertTo-GmpText $x } $t }.GetNewClosure()
     $body = '<create_credential><name>{0}</name><type>up</type><allow_insecure>0</allow_insecure><login>{1}</login><password>{2}</password><comment>Rotated per scan by GvmJitCredential. The stored value is invalid between scans by design.</comment></create_credential>' -f
                 (& $esc $CredentialName), (& $esc $ScanAccount), (& $esc $placeholder)
     $created = Send-Gmp $body @('200', '201')

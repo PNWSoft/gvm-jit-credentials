@@ -82,28 +82,40 @@ try { $runner = New-Object System.Security.Principal.NTAccount($RunnerAccount) |
 catch { throw "Could not resolve '$RunnerAccount' to a SID. For a gMSA remember the trailing '$'." }
 
 if ($PSCmdlet.ShouldProcess($account.DistinguishedName, "Delegate password reset and enable/disable to $RunnerAccount")) {
-    $adPath = "AD:\$($account.DistinguishedName)"
-    $acl = Get-Acl -Path $adPath
+    # The AD: drive binds to the ActiveDirectory module's own default DC, NOT to $pdc. In a
+    # multi-DC domain the object we just created has usually not replicated there yet, so Get-Acl
+    # fails with "Cannot find path" and the delegation is silently never applied -- every later
+    # Grant then fails with access denied, far from the cause. Bind a drive to $pdc explicitly.
+    $driveName = 'GvmJitPdc'
+    if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) { Remove-PSDrive -Name $driveName -Force }
+    $null = New-PSDrive -Name $driveName -PSProvider ActiveDirectory -Server $pdc -Root '' -Scope Script
+    try {
+        $adPath = "${driveName}:\$($account.DistinguishedName)"
+        $acl = Get-Acl -Path $adPath
 
     # Reset Password is an extended right, identified by this well-known GUID.
     $resetPassword = [guid]'00299570-246d-11d0-a768-00aa006e0529'
     # userAccountControl carries the enabled/disabled bit; writing that property is what
     # Enable-ADAccount / Disable-ADAccount actually do.
     $userAccountControl = [guid]'bf967a68-0de6-11d0-a285-00aa003049e2'
-    # pwdLastSet must be writable for a reset to behave correctly.
-    $pwdLastSet = [guid]'bf967a0a-0de6-11d0-a285-00aa003049e2'
+    # WriteProperty on pwdLastSet is deliberately NOT granted. It is only needed to force
+    # "user must change password at next logon", which an administrative -Reset does not do:
+    # the DC maintains pwdLastSet itself. The Delegation Wizard grants it as part of its
+    # "reset password" task; this script aims at the minimum instead.
 
     $rules = @(
         [System.DirectoryServices.ActiveDirectoryAccessRule]::new(
             $runner, 'ExtendedRight', 'Allow', $resetPassword, 'None')
         [System.DirectoryServices.ActiveDirectoryAccessRule]::new(
             $runner, 'WriteProperty', 'Allow', $userAccountControl, 'None')
-        [System.DirectoryServices.ActiveDirectoryAccessRule]::new(
-            $runner, 'WriteProperty', 'Allow', $pwdLastSet, 'None')
     )
-    foreach ($r in $rules) { $acl.AddAccessRule($r) }
-    Set-Acl -Path $adPath -AclObject $acl
-    Write-Host "  delegated to $RunnerAccount on this object only" -ForegroundColor Green
+        foreach ($r in $rules) { $acl.AddAccessRule($r) }
+        Set-Acl -Path $adPath -AclObject $acl
+        Write-Host "  delegated to $RunnerAccount on this object only" -ForegroundColor Green
+    }
+    finally {
+        Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # --- 3) the event log source, so the low-privilege runner can write the audit trail
@@ -116,6 +128,9 @@ if (-not [System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
     }
 }
 else { Write-Host "  event log source '$EventLogSource' already present" -ForegroundColor Yellow }
+Write-Host '  NOTE: the event log source is machine-local. If you ran this bootstrap somewhere' -ForegroundColor Yellow
+Write-Host '  other than the RUNNER host, create it there too or the grant/revoke audit trail' -ForegroundColor Yellow
+Write-Host "  silently vanishes: New-EventLog -LogName Application -Source '$EventLogSource'" -ForegroundColor Yellow
 
 Write-Host @"
 

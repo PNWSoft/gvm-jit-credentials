@@ -33,7 +33,9 @@ function Revoke-GvmScanCredential {
       backstop, where the task SHOULD report failure. Leave it off inside a finally block.
 
     .OUTPUTS
-      A record of what succeeded: Disabled, PasswordReset, GreenboneBlanked, Errors.
+      A record of what succeeded: Disabled, PasswordReset, GreenboneBlanked, Errors, Warnings.
+      -Strict throws on Errors only. Warnings cover the best-effort Greenbone overwrite, whose
+      failure leaves nothing usable behind provided the AD reset succeeded.
 
     .EXAMPLE
       $grant = Grant-GvmScanCredential @params
@@ -81,8 +83,14 @@ function Revoke-GvmScanCredential {
     }
 
     if (-not $Server) {
+        # Do NOT fall back to $env:USERDNSDOMAIN: it is unset in non-interactive service sessions
+        # (a gMSA-run scheduled task), and passing -Server '' throws a binding error on every step,
+        # silently unless -Strict. Leaving it empty lets the AD cmdlets do their own discovery.
         try { $Server = Resolve-JitDomainController }
-        catch { $Server = $env:USERDNSDOMAIN }
+        catch {
+            Write-JitLog ('Could not resolve the PDC emulator; falling back to AD cmdlet discovery: ' + $_.Exception.Message) 1011 'Warning' $LogSource
+            $Server = ''
+        }
     }
 
     if (-not $PSCmdlet.ShouldProcess("scan account '$Identity' on $Server", 'Disable and invalidate password')) {
@@ -96,6 +104,7 @@ function Revoke-GvmScanCredential {
         PasswordReset    = $false
         GreenboneBlanked = $false
         Errors           = [System.Collections.Generic.List[string]]::new()
+        Warnings         = [System.Collections.Generic.List[string]]::new()
         RevokedAt        = (Get-Date)
     }
 
@@ -128,7 +137,11 @@ function Revoke-GvmScanCredential {
     # --- 3) best-effort: overwrite the value Greenbone stores as well
     if ($BlankGreenboneCredential -and $CredentialId -and $ScannerHost -and $GmpHelper) {
         try {
-            $filler = if ($garbage) { $garbage } else { New-EphemeralPassword -Length $PasswordLength }
+            # MUST be an independent value, never $garbage. Pushing the same value would leave
+            # Greenbone holding the account's CURRENT VALID password, so the only thing preventing
+            # its use would be the account being disabled -- collapsing the two independent layers
+            # into one. That is the standing-credential problem this module exists to remove.
+            $filler = New-EphemeralPassword -Length $PasswordLength
             $body = '<modify_credential credential_id="{0}"><password>{1}</password></modify_credential>' -f `
                 $CredentialId, (ConvertTo-GmpText $filler)
             $null = Invoke-GmpRequest -Xml $body -ScannerHost $ScannerHost -GmpHelper $GmpHelper `
@@ -137,9 +150,13 @@ function Revoke-GvmScanCredential {
             Write-JitLog 'Greenbone-stored credential overwritten' 1008 'Information' $LogSource
         }
         catch {
-            # Warning, not Error: the AD reset above already made the stored value useless.
-            $msg = "Greenbone credential blanking failed (the AD reset already invalidated it): $($_.Exception.Message)"
-            $result.Errors.Add($msg)
+            # A WARNING, not an error, and deliberately NOT counted by -Strict. If step 2 succeeded,
+            # the value Greenbone still holds is the Grant-era password, which that reset has just
+            # invalidated -- so failing to overwrite it leaves no usable credential behind. This is
+            # hygiene, not a security boundary. If step 2 FAILED, that is already recorded in
+            # Errors and -Strict will throw on it.
+            $msg = "Greenbone credential blanking failed (the AD reset already invalidated the stored value): $($_.Exception.Message)"
+            $result.Warnings.Add($msg)
             Write-JitLog $msg 1010 'Warning' $LogSource
         }
     }

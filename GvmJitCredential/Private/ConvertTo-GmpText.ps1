@@ -4,8 +4,8 @@ function ConvertTo-GmpText {
       XML-escapes a value for interpolation into a GMP request body.
 
     .DESCRIPTION
-      Passwords are generated from a set that includes & < > and quotes, so escaping is not
-      optional -- an unescaped '&' produces malformed XML and the credential push fails, or
+      The generated password alphabet includes '&', so escaping is not optional; login names and
+      object names supplied by the caller may contain any of & < > too -- an unescaped '&' produces malformed XML and the credential push fails, or
       worse, silently stores a truncated password that then fails to authenticate mid-scan.
     #>
     [CmdletBinding()]

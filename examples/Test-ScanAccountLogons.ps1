@@ -21,8 +21,12 @@
 
   Emits Nagios/PRTG-style output and exit code: 0 = OK, 2 = CRITICAL, 3 = UNKNOWN.
 
-  Reads the Security log, so it must run somewhere those events land -- typically a domain
-  controller, or wherever you forward events to. Needs rights to read the Security log.
+  Reads the Security log, so it must run where the events actually land. IMPORTANT: a type 3
+  logon to a member server is written to THAT SERVER's Security log, not to a DC. Running this on a
+  domain controller therefore shows only logons to the DC itself and will NOT see the lateral SMB
+  movement this is meant to catch. Either point -ComputerName at the scanned hosts, or run it
+  against a collector that Windows Event Forwarding / your SIEM populates. On a DC, Kerberos
+  service tickets (4769) are the closer equivalent signal.
 
 .PARAMETER ComputerName
   Where to read the Security log from. Defaults to the local machine.

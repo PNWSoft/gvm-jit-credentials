@@ -88,12 +88,16 @@ function Invoke-GvmJitScan {
         Revoke     = $null
     }
 
-    $grant = Grant-GvmScanCredential -Identity $Identity -CredentialId $CredentialId `
-                -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `
-                -Server $Server -PasswordLength $PasswordLength `
-                -ReplicationDelaySeconds $ReplicationDelaySeconds -LogSource $LogSource
-
+    # Grant is INSIDE the try: if it throws after enabling the account, the finally must still get
+    # a chance to run. Grant rolls itself back in that case, so $grant stays $null and the finally
+    # skips -- but a future change to either function must not reintroduce an unprotected window.
+    $grant = $null
     try {
+        $grant = Grant-GvmScanCredential -Identity $Identity -CredentialId $CredentialId `
+            -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `
+            -Server $Server -PasswordLength $PasswordLength `
+            -ReplicationDelaySeconds $ReplicationDelaySeconds -LogSource $LogSource
+
         # The reset was written to the PDC emulator; give it time to reach the DCs the targets will
         # actually authenticate against. Skipping this produces a scan that silently falls back to
         # unauthenticated results, which looks like a clean scan rather than a failed one.
@@ -135,7 +139,8 @@ function Invoke-GvmJitScan {
     finally {
         # Not inside a try/catch of its own: Revoke-GvmScanCredential does not throw by default, so
         # it cannot mask an exception already propagating from the scan.
-        $result.Revoke     = Revoke-GvmScanCredential -Grant $grant
+        # $grant is null only when Grant itself failed, and Grant rolls back its own partial state.
+        if ($grant) { $result.Revoke = Revoke-GvmScanCredential -Grant $grant }
         $result.FinishedAt = Get-Date
         $result.Duration   = $result.FinishedAt - $result.StartedAt
     }

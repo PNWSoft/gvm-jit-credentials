@@ -28,7 +28,7 @@ Describe 'Invoke-GvmJitScan' {
             }
         }
         Mock -ModuleName GvmJitCredential Revoke-GvmScanCredential {
-            [pscustomobject]@{ Disabled = $true; PasswordReset = $true; Errors = @() }
+            [pscustomobject]@{ Disabled = $true; PasswordReset = $true; Errors = @(); Warnings = @() }
         }
 
         $common = @{
@@ -63,9 +63,13 @@ Describe 'Invoke-GvmJitScan' {
             $r.Duration | Should -Not -BeNullOrEmpty
         }
 
-        It 'accepts 202 Accepted from start_task' {
-            # start_task answers 202, not 200. Treating only 200 as success would fail every scan.
-            { Invoke-GvmJitScan @common -TaskId 'task-1' } | Should -Not -Throw
+        It 'asks Invoke-GmpRequest to accept 202 on start_task' {
+            # start_task answers 202, not 200. Asserting only "does not throw" was tautological:
+            # Invoke-GmpRequest is mocked, so -ExpectStatus was never evaluated and the test passed
+            # even with the 202 handling deleted. Assert the parameter is actually passed.
+            $null = Invoke-GvmJitScan @common -TaskId 'task-1'
+            Should -Invoke -ModuleName GvmJitCredential Invoke-GmpRequest `
+                -ParameterFilter { $Xml -match 'start_task' -and $ExpectStatus -contains '202' }
         }
 
         It 'treats Stopped and Interrupted as terminal, not as reasons to poll forever' {
@@ -112,7 +116,7 @@ Describe 'Invoke-GvmJitScan' {
 
         It 'still revokes when the revoke itself reports partial failure' {
             Mock -ModuleName GvmJitCredential Revoke-GvmScanCredential {
-                [pscustomobject]@{ Disabled = $false; PasswordReset = $true; Errors = @('disable failed') }
+                [pscustomobject]@{ Disabled = $false; PasswordReset = $true; Errors = @('disable failed'); Warnings = @() }
             }
             Mock -ModuleName GvmJitCredential Invoke-GmpRequest {
                 if ($Xml -match 'start_task') { return [xml]'<r status="202"/>' }

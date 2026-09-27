@@ -49,6 +49,8 @@
 .EXAMPLE
   .\Sign-Module.ps1 -Thumbprint 1A2B3C... -WhatIf     # list what would be signed
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'TimestampServer',
+    Justification = 'Used inside the $signer scriptblock created with .GetNewClosure(); the analyzer cannot see through the closure.')]
 [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'ByThumbprint')]
 param(
     [Parameter(Mandatory, ParameterSetName = 'ByThumbprint')][string]$Thumbprint,
@@ -141,11 +143,8 @@ $editions = switch ($VerifyWith) {
 }
 
 Write-Host "`nRe-parsing signed files (this is the check that catches signing corruption)..."
-foreach ($edition in $editions) {
-    $exe = Get-Command $edition -ErrorAction SilentlyContinue
-    if (-not $exe) { Write-Host "  $edition not available; skipped" -ForegroundColor Yellow; continue }
-
-    $script = @'
+$verifier = Join-Path ([IO.Path]::GetTempPath()) ("gvmjit-verify-{0}.ps1" -f [guid]::NewGuid())
+@'
 $bad = 0
 foreach ($p in $args) {
     $e = $null
@@ -153,12 +152,25 @@ foreach ($p in $args) {
     if ($e) { $bad++; Write-Host ("  PARSE FAIL {0}:{1} {2}" -f (Split-Path $p -Leaf), $e[0].Extent.StartLineNumber, $e[0].Message) }
 }
 exit $bad
-'@
-    & $exe.Source -NoProfile -ExecutionPolicy Bypass -Command $script -args $signed
-    if ($LASTEXITCODE -ne 0) {
-        throw "$LASTEXITCODE file(s) fail to parse under $edition AFTER signing. Check line endings; signtool truncates LF-only files."
+'@ | Set-Content -LiteralPath $verifier -Encoding ASCII
+
+try {
+    foreach ($edition in $editions) {
+        $exe = Get-Command $edition -ErrorAction SilentlyContinue
+        if (-not $exe) { Write-Host "  $edition not available; skipped" -ForegroundColor Yellow; continue }
+
+        # -File, not -Command: with -Command the rest of the line is command TEXT, so '-args' is a
+        # syntax error and nothing is ever parsed -- the check would report failure on every good run.
+        # The verifier is a separate file precisely so the path list can be passed as arguments.
+        & $exe.Source -NoProfile -ExecutionPolicy Bypass -File $verifier @signed
+        if ($LASTEXITCODE -ne 0) {
+            throw "$LASTEXITCODE file(s) fail to parse under $edition AFTER signing. Check line endings; signtool truncates LF-only files."
+        }
+        Write-Host "  $edition : all parse clean" -ForegroundColor Green
     }
-    Write-Host "  $edition ($((& $exe.Source -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'))): all parse clean" -ForegroundColor Green
+}
+finally {
+    Remove-Item -LiteralPath $verifier -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "`nDone. $($signed.Count) file(s) signed and verified." -ForegroundColor Green

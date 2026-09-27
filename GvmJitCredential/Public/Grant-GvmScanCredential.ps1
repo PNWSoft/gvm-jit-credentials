@@ -34,13 +34,14 @@ function Grant-GvmScanCredential {
       bootstrap/Initialize-GvmScanCredential.ps1.
 
     .OUTPUTS
-      A grant record (Identity, CredentialId, Server, GrantedAt) suitable for splatting into
-      Revoke-GvmScanCredential. It deliberately does NOT contain the password.
+      A grant record (Identity, CredentialId, Server, GrantedAt) to pass to
+      Revoke-GvmScanCredential as -Grant. It deliberately does NOT contain the password.
+      It is a PSCustomObject, so it cannot be splatted -- use -Grant, not @grant.
 
     .EXAMPLE
       $grant = Grant-GvmScanCredential -Identity greenbone-scan -CredentialId $cfg.CredentialId `
                  -ScannerHost scanner@scanner.example.local -GmpHelper /opt/gvm/gmp.sh
-      try { Start-MyScan } finally { Revoke-GvmScanCredential @grant }
+      try { Start-MyScan } finally { Revoke-GvmScanCredential -Grant $grant }
     #>
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([pscustomobject])]
@@ -72,21 +73,41 @@ function Grant-GvmScanCredential {
     Set-JitAccountEnabled -Identity $Identity -Enabled $true -Server $Server
     Write-JitLog "Account '$Identity' ENABLED" 1001 'Information' $LogSource
 
-    $password = New-EphemeralPassword -Length $PasswordLength
+    # From here on the account is ENABLED. Any failure below must undo that before rethrowing:
+    # an enabled account with a live (or unknown) password is the exact state this module exists to
+    # prevent, and the caller cannot clean up because it never received a grant record.
+    $password = $null
+    $body = $null
     try {
+        $password = New-EphemeralPassword -Length $PasswordLength
         Set-JitAccountPassword -Identity $Identity -Password $password -Server $Server
         Write-JitLog 'Password rotated in AD' 1002 'Information' $LogSource
 
-        $body = '<modify_credential credential_id="{0}"><password>{1}</password></modify_credential>' -f
-                    $CredentialId, (ConvertTo-GmpText $password)
+        $body = '<modify_credential credential_id="{0}"><password>{1}</password></modify_credential>' -f `
+            $CredentialId, (ConvertTo-GmpText $password)
         $null = Invoke-GmpRequest -Xml $body -ScannerHost $ScannerHost -GmpHelper $GmpHelper `
-                    -IdentityFile $IdentityFile
+            -IdentityFile $IdentityFile
         Write-JitLog 'Greenbone credential updated for this scan window' 1003 'Information' $LogSource
     }
+    catch {
+        Write-JitLog ("Grant FAILED after enabling '$Identity'; rolling back. " + $_.Exception.Message) 1009 'Error' $LogSource
+        try {
+            $null = Revoke-GvmScanCredential -Identity $Identity -CredentialId $CredentialId `
+                -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `
+                -Server $Server -LogSource $LogSource
+        }
+        catch {
+            # Rollback failing is the worst case: enabled account, nobody cleaning up. Say so loudly.
+            Write-JitLog ("ROLLBACK ALSO FAILED for '$Identity' - the account may still be ENABLED. Investigate immediately: " + $_.Exception.Message) 1903 'Error' $LogSource
+        }
+        throw
+    }
     finally {
-        # Drop our reference promptly. This does not zero the string -- see CAVEATS in the README.
+        # Drops our references. It does NOT zero the strings -- see CAVEATS in the README. $body is
+        # cleared too: it carries the same plaintext as $password.
         $password = $null
-        Remove-Variable password -ErrorAction SilentlyContinue
+        $body = $null
+        Remove-Variable password, body -ErrorAction SilentlyContinue
     }
 
     return [pscustomobject]@{

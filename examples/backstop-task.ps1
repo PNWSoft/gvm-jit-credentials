@@ -16,9 +16,13 @@
 
   Register with (adjust to taste):
 
+    # -Command, NOT -File: with -File, everything after the script path is passed to the script as
+    # arguments and '*>' is never parsed as redirection, so the task fails every single run. For the
+    # backstop that means the one mitigation covering kill/reboot would never actually fire.
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-        '-NoProfile -ExecutionPolicy AllSigned -File "C:\GvmJit\examples\backstop-task.ps1" ' +
-        '-ConfigPath "C:\GvmJit\config.psd1" *> "C:\GvmJit\backstop-last-run.log"')
+        '-NoProfile -ExecutionPolicy AllSigned -Command ' +
+        '"& ''C:\GvmJit\examples\backstop-task.ps1'' -ConfigPath ''C:\GvmJit\config.psd1'' ' +
+        '*> ''C:\GvmJit\backstop-last-run.log''"')
     Register-ScheduledTask -TaskName 'GVM JIT credential backstop' -Action $action `
         -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 10:30) `
         -Principal (New-ScheduledTaskPrincipal -UserId 'EXAMPLE\gvm-runner$' -LogonType Password -RunLevel Limited)
