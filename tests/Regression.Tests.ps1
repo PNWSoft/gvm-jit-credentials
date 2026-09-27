@@ -187,3 +187,55 @@ Describe 'Invoke-GmpRequest' {
         }
     }
 }
+
+Describe 'Public GMP surface for -ScanAction callers' {
+    It 'exports a GMP request function and an escaping helper' {
+        # Without these, a -ScanAction block that builds its own target has no way to reach Greenbone
+        # except by reimplementing the transport.
+        (Get-Command -Module GvmJitCredential).Name | Should -Contain 'Invoke-GvmGmpRequest'
+        (Get-Command -Module GvmJitCredential).Name | Should -Contain 'ConvertTo-GvmGmpText'
+    }
+
+    It 'escapes values that would otherwise break a request body' {
+        ConvertTo-GvmGmpText 'a&b<c>' | Should -Be 'a&amp;b&lt;c&gt;'
+    }
+
+    It 'passes ExpectStatus through, so create_* returning 201 is accepted' {
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { [xml]'<create_target_response status="201" id="t-1"/>' }
+        $d = Invoke-GvmGmpRequest -Xml '<create_target/>' -ScannerHost 'h' -GmpHelper '/g' -ExpectStatus 200, 201
+        $d.DocumentElement.GetAttribute('id') | Should -Be 't-1'
+        Should -Invoke -ModuleName GvmJitCredential Invoke-GmpRequest `
+            -ParameterFilter { $ExpectStatus -contains '201' }
+    }
+}
+
+Describe 'ScanAction scope contract' {
+    # examples/weekly-ou-scan.ps1 passes a -ScanAction block that READS variables from the script
+    # that defined it ($ipList, $CredentialId, $stamp...) and WRITES results back via $script:.
+    # If PowerShell resolved those in the module's scope instead, the driver would silently build a
+    # target from empty values. Pin the behaviour the driver relies on.
+    BeforeEach {
+        Mock -ModuleName GvmJitCredential Resolve-JitDomainController { 'dc1.example.local' }
+        Mock -ModuleName GvmJitCredential Set-JitAccountEnabled {}
+        Mock -ModuleName GvmJitCredential Set-JitAccountPassword {}
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { [xml]'<r status="200"/>' }
+        Mock -ModuleName GvmJitCredential Write-JitLog {}
+        Mock -ModuleName GvmJitCredential Start-Sleep {}
+    }
+
+    It 'can read variables from the scope that defined it' {
+        $outerValue = 'VISIBLE'
+        $script:readBack = 'NOT-SET'
+        $null = Invoke-GvmJitScan -Identity a -CredentialId b -ScannerHost c -GmpHelper d `
+                    -ReplicationDelaySeconds 0 -ScanAction { $script:readBack = $outerValue }
+        $script:readBack | Should -Be 'VISIBLE'
+    }
+
+    It 'can read an array and preserve its contents' {
+        $hosts = @('10.0.0.1', '10.0.0.2', '10.0.0.3')
+        $script:joined = ''
+        $null = Invoke-GvmJitScan -Identity a -CredentialId b -ScannerHost c -GmpHelper d `
+                    -ReplicationDelaySeconds 0 -ScanAction { $script:joined = $hosts -join ',' }
+        $script:joined | Should -Be '10.0.0.1,10.0.0.2,10.0.0.3'
+    }
+}

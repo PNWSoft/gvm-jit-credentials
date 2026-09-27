@@ -18,6 +18,9 @@
         'Grant-GvmScanCredential'
         'Revoke-GvmScanCredential'
         'Invoke-GvmJitScan'
+        # Needed by -ScanAction callers who build their own targets and tasks each run.
+        'Invoke-GvmGmpRequest'
+        'ConvertTo-GvmGmpText'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()
