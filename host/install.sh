@@ -1,42 +1,87 @@
 #!/usr/bin/env bash
 #
-# Installs gmp.sh on the Greenbone host and creates .gmp.env from the example if absent.
+# Installs the GMP helper pair on the Greenbone Docker host:
 #
-# Run on the Docker host, as a user who can write $PREFIX. Idempotent.
+#   gmp.sh        world-readable stub, invoked over SSH; execs the relay via scoped sudo
+#   gmp-relay.sh  root-owned 0700, does the docker work
+#   .gmp.env      0600, holds the GMP username and password
+#   sudoers rule  lets ONE account run ONE script as root -- no docker group membership
+#
+# Run as root on the Docker host. Idempotent.
 #
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/greenbone}"
+SCAN_ACCOUNT="${SCAN_ACCOUNT:-greenbone-scan}"
+SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/gvm-jit-gmp-relay}"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+[ "$(id -u)" -eq 0 ] || { echo "install.sh must run as root" >&2; exit 1; }
 
 echo "Installing to $PREFIX"
 mkdir -p "$PREFIX"
-install -m 0755 "$SRC_DIR/gmp.sh" "$PREFIX/gmp.sh"
-echo "  installed $PREFIX/gmp.sh"
+
+install -m 0755 -o root -g root "$SRC_DIR/gmp.sh"       "$PREFIX/gmp.sh"
+install -m 0700 -o root -g root "$SRC_DIR/gmp-relay.sh" "$PREFIX/gmp-relay.sh"
+echo "  installed $PREFIX/gmp.sh (0755) and $PREFIX/gmp-relay.sh (0700 root)"
+
+# The stub has the relay path baked in; keep them consistent if PREFIX was overridden.
+if [ "$PREFIX" != "/opt/greenbone" ]; then
+    sed -i "s|/opt/greenbone/gmp-relay.sh|$PREFIX/gmp-relay.sh|" "$PREFIX/gmp.sh"
+    echo "  rewrote the relay path in gmp.sh for PREFIX=$PREFIX"
+fi
 
 if [ -e "$PREFIX/.gmp.env" ]; then
     echo "  $PREFIX/.gmp.env exists; leaving it alone"
 else
-    install -m 0600 "$SRC_DIR/gmp.env.example" "$PREFIX/.gmp.env"
-    echo "  created $PREFIX/.gmp.env (mode 600) -- EDIT IT NOW, it contains a placeholder password"
+    install -m 0600 -o root -g root "$SRC_DIR/gmp.env.example" "$PREFIX/.gmp.env"
+    echo "  created $PREFIX/.gmp.env (0600) -- EDIT IT NOW, it holds a placeholder password"
 fi
 
-# Nudge rather than fix: tightening someone else's file without saying so is worse than telling them.
-perms="$(stat -c '%a' "$PREFIX/.gmp.env")"
-if [ "$perms" != "600" ] && [ "$perms" != "400" ]; then
-    echo "  WARNING: $PREFIX/.gmp.env is mode $perms. Run: chmod 600 $PREFIX/.gmp.env"
+# Scoped sudo: one account, one command, no password. requiretty is disabled because the caller
+# arrives over SSH with no TTY.
+tmp="$(mktemp)"
+# env_reset and secure_path are distro defaults on Debian/Ubuntu but NOT sudo's compiled-in
+# behaviour, and this rule grants root. State them explicitly so the fragment does not depend on
+# whatever /etc/sudoers happens to contain.
+cat > "$tmp" <<SUDOERS
+Defaults:$SCAN_ACCOUNT !requiretty
+Defaults:$SCAN_ACCOUNT env_reset, secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
+$SCAN_ACCOUNT ALL=(root) NOPASSWD: $PREFIX/gmp-relay.sh
+SUDOERS
+
+# Validate BEFORE installing: a malformed sudoers file can lock out sudo entirely.
+if visudo -cf "$tmp" >/dev/null 2>&1; then
+    install -m 0440 -o root -g root "$tmp" "$SUDOERS_FILE"
+    rm -f "$tmp"
+    echo "  installed $SUDOERS_FILE ($SCAN_ACCOUNT may run only $PREFIX/gmp-relay.sh)"
+else
+    rm -f "$tmp"
+    echo "  ERROR: generated sudoers rule failed validation; nothing installed" >&2
+    exit 1
 fi
+visudo -c >/dev/null || { echo "  ERROR: sudoers validation failed after install" >&2; exit 1; }
 
 cat <<NEXT
 
 Next:
-  1. Edit $PREFIX/.gmp.env with a dedicated low-privilege GMP user.
-  2. Verify:  echo '<get_version/>' | $PREFIX/gmp.sh
-     Expect a <get_version_response status="200"> element.
-  3. Give the Windows runner account an SSH key to this host, then confirm from there:
-     echo '<get_version/>' | ssh -o BatchMode=yes USER@THIS_HOST $PREFIX/gmp.sh
+  1. Edit $PREFIX/.gmp.env -- a DEDICATED low-privilege GMP user, never Greenbone's 'admin'.
+     Either GMP_USER/GMP_PASS or GMP_USERNAME/GMP_PASSWORD is accepted.
+  2. Verify as root:
+       echo '<get_version/>' | $PREFIX/gmp-relay.sh
+  3. Verify as the scan account (this is the path the Windows side uses):
+       sudo -u $SCAN_ACCOUNT sh -c "echo '<get_version/>' | $PREFIX/gmp.sh"
+     Expect: <get_version_response status="200">...
+  4. Restrict the runner's key in ~$SCAN_ACCOUNT/.ssh/authorized_keys so a stolen key cannot get a
+     shell (sshd enforces this whatever the client requests):
+       command="$PREFIX/gmp.sh",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA...
+     A forced command OVERRIDES the requested one -- if you ever move gmp.sh, update the key too, or
+     callers will keep hitting the old path while still appearing to succeed.
 
-If step 2 works but step 3 does not, it is almost always one of:
-  - the host key is not in the CALLING account's known_hosts (BatchMode makes ssh fail silently), or
-  - the key is in a different account's profile than the one the scheduled task runs as.
+  5. From the Windows runner, confirm over SSH:
+       echo '<get_version/>' | ssh -o BatchMode=yes $SCAN_ACCOUNT@THIS_HOST $PREFIX/gmp.sh
+
+If step 2 works but step 3 does not, the sudoers rule or the relay's permissions are wrong.
+If step 3 works but step 4 does not, it is the SSH key or known_hosts of the CALLING account --
+BatchMode ssh fails silently on an unknown host key.
 NEXT

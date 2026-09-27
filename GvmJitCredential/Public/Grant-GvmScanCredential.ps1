@@ -47,7 +47,8 @@ function Grant-GvmScanCredential {
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$Identity,
-        [Parameter(Mandatory)][string]$CredentialId,
+        # Interpolated into a GMP request body; validated so it cannot inject XML.
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$CredentialId,
         [Parameter(Mandatory)][string]$ScannerHost,
         [Parameter(Mandatory)][string]$GmpHelper,
         [string]$IdentityFile = '',
@@ -92,9 +93,12 @@ function Grant-GvmScanCredential {
     catch {
         Write-JitLog ("Grant FAILED after enabling '$Identity'; rolling back. " + $_.Exception.Message) 1009 'Error' $LogSource
         try {
+            # -Strict so a rollback that fails THROWS and lands in the catch below, producing the
+            # 1903 event. Without it Revoke returns normally with its failures only in .Errors, and
+            # the "rollback also failed" branch is effectively unreachable.
             $null = Revoke-GvmScanCredential -Identity $Identity -CredentialId $CredentialId `
                 -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `
-                -Server $Server -LogSource $LogSource
+                -Server $Server -LogSource $LogSource -Strict
         }
         catch {
             # Rollback failing is the worst case: enabled account, nobody cleaning up. Say so loudly.

@@ -52,11 +52,11 @@ function Invoke-GvmJitScan {
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$Identity,
-        [Parameter(Mandatory)][string]$CredentialId,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$CredentialId,
         [Parameter(Mandatory)][string]$ScannerHost,
         [Parameter(Mandatory)][string]$GmpHelper,
 
-        [Parameter(Mandatory, ParameterSetName = 'ByTaskId')][string]$TaskId,
+        [Parameter(Mandatory, ParameterSetName = 'ByTaskId')][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$TaskId,
         [Parameter(Mandatory, ParameterSetName = 'ByScanAction')][scriptblock]$ScanAction,
 
         [string]$IdentityFile = '',

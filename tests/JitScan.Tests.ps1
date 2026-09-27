@@ -20,8 +20,8 @@ Describe 'Invoke-GvmJitScan' {
         Mock -ModuleName GvmJitCredential Start-Sleep {}
         Mock -ModuleName GvmJitCredential Grant-GvmScanCredential {
             [pscustomobject]@{
-                Identity = 'scan-acct'; CredentialId = 'cred-1'
-                ScannerHost = 'scanner@host'; GmpHelper = '/opt/gvm/gmp.sh'
+                Identity = 'scan-acct'; CredentialId = '11111111-2222-3333-4444-555555555555'
+                ScannerHost = 'scanner@host.example.local'; GmpHelper = '/opt/gvm/gmp.sh'
                 IdentityFile = ''; Server = 'dc1.example.local'
                 LogSource = 'GvmJitCredential'; GrantedAt = (Get-Date)
                 ReplicationDelaySeconds = 0
@@ -33,7 +33,7 @@ Describe 'Invoke-GvmJitScan' {
 
         $common = @{
             Identity     = 'scan-acct'
-            CredentialId = 'cred-1'
+            CredentialId = '11111111-2222-3333-4444-555555555555'
             ScannerHost  = 'scanner@host'
             GmpHelper    = '/opt/gvm/gmp.sh'
             PollSeconds  = 0
@@ -49,17 +49,17 @@ Describe 'Invoke-GvmJitScan' {
         }
 
         It 'grants, scans and revokes exactly once each' {
-            $r = Invoke-GvmJitScan @common -TaskId 'task-1'
+            $r = Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555'
             Should -Invoke -ModuleName GvmJitCredential Grant-GvmScanCredential -Times 1 -Exactly
             Should -Invoke -ModuleName GvmJitCredential Revoke-GvmScanCredential -Times 1 -Exactly
             $r.Status | Should -Be 'Done'
         }
 
         It 'reports the terminal status and the report id' {
-            $r = Invoke-GvmJitScan @common -TaskId 'task-1'
+            $r = Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555'
             $r.Status   | Should -Be 'Done'
             $r.ReportId | Should -Be 'rep-9'
-            $r.TaskId   | Should -Be 'task-1'
+            $r.TaskId   | Should -Be '99999999-8888-7777-6666-555555555555'
             $r.Duration | Should -Not -BeNullOrEmpty
         }
 
@@ -67,7 +67,7 @@ Describe 'Invoke-GvmJitScan' {
             # start_task answers 202, not 200. Asserting only "does not throw" was tautological:
             # Invoke-GmpRequest is mocked, so -ExpectStatus was never evaluated and the test passed
             # even with the 202 handling deleted. Assert the parameter is actually passed.
-            $null = Invoke-GvmJitScan @common -TaskId 'task-1'
+            $null = Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555'
             Should -Invoke -ModuleName GvmJitCredential Invoke-GmpRequest `
                 -ParameterFilter { $Xml -match 'start_task' -and $ExpectStatus -contains '202' }
         }
@@ -78,7 +78,7 @@ Describe 'Invoke-GvmJitScan' {
                     if ($Xml -match 'start_task') { return [xml]'<r status="202"/>' }
                     return [xml]"<get_tasks_response status=`"200`"><task><status>$state</status></task></get_tasks_response>"
                 }
-                $r = Invoke-GvmJitScan @common -TaskId 'task-1'
+                $r = Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555'
                 $r.Status | Should -Be $state
             }
         }
@@ -87,7 +87,7 @@ Describe 'Invoke-GvmJitScan' {
     Context 'the credential is revoked whatever goes wrong' {
         It 'revokes when starting the task fails' {
             Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'GMP start_task failed: status=404' }
-            { Invoke-GvmJitScan @common -TaskId 'task-1' } | Should -Throw
+            { Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555' } | Should -Throw
             Should -Invoke -ModuleName GvmJitCredential Revoke-GvmScanCredential -Times 1 -Exactly
         }
 
@@ -96,7 +96,7 @@ Describe 'Invoke-GvmJitScan' {
                 if ($Xml -match 'start_task') { return [xml]'<r status="202"/>' }
                 return [xml]'<get_tasks_response status="200"><task><status>Running</status></task></get_tasks_response>'
             }
-            { Invoke-GvmJitScan @common -TaskId 'task-1' -MaxScanMinutes 0 } |
+            { Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555' -MaxScanMinutes 0 } |
                 Should -Throw '*exceeded MaxScanMinutes*'
             Should -Invoke -ModuleName GvmJitCredential Revoke-GvmScanCredential -Times 1 -Exactly
         }
@@ -111,7 +111,7 @@ Describe 'Invoke-GvmJitScan' {
             # A revoke that swallowed or replaced the real failure would leave you debugging
             # the cleanup instead of the scan.
             Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'the actual root cause' }
-            { Invoke-GvmJitScan @common -TaskId 'task-1' } | Should -Throw '*the actual root cause*'
+            { Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555' } | Should -Throw '*the actual root cause*'
         }
 
         It 'still revokes when the revoke itself reports partial failure' {
@@ -122,7 +122,7 @@ Describe 'Invoke-GvmJitScan' {
                 if ($Xml -match 'start_task') { return [xml]'<r status="202"/>' }
                 return [xml]'<get_tasks_response status="200"><task><status>Done</status></task></get_tasks_response>'
             }
-            $r = Invoke-GvmJitScan @common -TaskId 'task-1'
+            $r = Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555'
             $r.Revoke.Disabled      | Should -BeFalse
             $r.Revoke.Errors.Count  | Should -BeGreaterThan 0
         }
@@ -143,7 +143,7 @@ Describe 'Invoke-GvmJitScan' {
         }
 
         It 'honours -WhatIf and neither grants nor revokes' {
-            $null = Invoke-GvmJitScan @common -TaskId 'task-1' -WhatIf
+            $null = Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555' -WhatIf
             Should -Invoke -ModuleName GvmJitCredential Grant-GvmScanCredential -Times 0
             Should -Invoke -ModuleName GvmJitCredential Revoke-GvmScanCredential -Times 0
         }

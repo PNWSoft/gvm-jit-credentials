@@ -48,16 +48,27 @@ param(
     [Parameter(Mandatory)][string]$Identity,
     [Parameter(Mandatory)][string]$ScannerHost,
     [Parameter(Mandatory)][string]$GmpHelper,
-    [Parameter(Mandatory)][string]$CredentialId,
-    [Parameter(Mandatory)][string]$ConfigId,
-    [Parameter(Mandatory)][string]$ScannerId,
-    [Parameter(Mandatory)][string]$PortListId,
+    # All four are interpolated into GMP request bodies. Validating them here means a mistyped or
+    # tampered config file fails immediately rather than producing a malformed -- or injected -- request.
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$CredentialId,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$ConfigId,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$ScannerId,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$PortListId,
     [Parameter(Mandatory)][string]$SearchBase,
     [string]$TargetSubnet = '',
-    [string]$AlertId = '',
+    [ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$AlertId = '',
     [string]$IdentityFile = '',
     # Records the host set and task UUID from the last run, so an unchanged host set can reuse
     # its task instead of orphaning one per run. Delete it to force a fresh task.
+    #
+    # ITS DIRECTORY MUST NOT BE WRITABLE BY NON-ADMINISTRATORS. C:\ProgramData grants
+    # BUILTIN\Users container-inherited create-file rights by default, so a subfolder created
+    # without resetting the ACL lets any local user pre-create this file, become CREATOR OWNER,
+    # and thereafter control which task the credentialed scan starts. The script verifies the
+    # recorded task before reusing it, but do not rely on that alone -- lock the directory down:
+    #   $acl = Get-Acl C:\ProgramData\GvmJit
+    #   $acl.SetAccessRuleProtection($true, $false)
+    #   # then grant SYSTEM + Administrators Full, the runner Modify, and nothing to Users
     [string]$StateFile = 'C:\ProgramData\GvmJit\weekly-ou-scan.state.psd1',
     [string]$TargetNamePrefix = 'JIT auto target',
     [string]$TaskNamePrefix = 'JIT weekly scan',
@@ -137,16 +148,56 @@ if ($state) {
     # and tolerant of a state file written by an older version.
     $prevHosts = if ($state.ContainsKey('Hosts'))  { [string]$state['Hosts'] }  else { '' }
     $prevTask  = if ($state.ContainsKey('TaskId')) { [string]$state['TaskId'] } else { '' }
+
+    # The state file is DATA, not trusted input. It is not signed, and depending on the ACL of its
+    # directory a non-administrator may be able to create or alter it. Whatever it names will be
+    # STARTED with the just-in-time credential live, so every field is validated before use and the
+    # task is then checked against this run's parameters. An attacker who could substitute a task
+    # UUID would otherwise have the runner enable the local-admin account and scan hosts of their
+    # choosing -- e.g. a machine they control, capturing NTLM for relay.
+    if ($prevTask -and $prevTask -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+        Write-Warning "State file TaskId is not a UUID ('$prevTask'); ignoring it and creating a new task."
+        $prevTask = ''
+    }
+
     if ($prevHosts -eq $fingerprint -and $prevTask) {
-        # Confirm it still exists: someone may have deleted it in GSA, and starting a missing task
-        # would fail after the credential is already live.
         try {
             $chk = Invoke-GvmGmpRequest @gmp -Xml ('<get_tasks task_id="{0}"/>' -f $prevTask)
-            if ($chk.SelectSingleNode('//task/name')) {
-                $reuseTaskId = $prevTask
-                Write-Host "  host set unchanged; reusing task $reuseTaskId"
+            $tNode = $chk.SelectSingleNode('//task[not(ancestor::task)]')
+            if (-not $tNode) {
+                Write-Host '  recorded task no longer exists; creating a new one'
             }
-            else { Write-Host '  recorded task no longer exists; creating a new one' }
+            else {
+                # Existence is not enough. Confirm this really is OUR task: same scan config, same
+                # scanner, and a target whose host list and SMB credential match what we are about
+                # to scan with. Any mismatch means the record is stale or tampered with.
+                $reasons = [System.Collections.Generic.List[string]]::new()
+
+                $cfgNode  = $tNode.SelectSingleNode('config/@id')
+                $scanNode = $tNode.SelectSingleNode('scanner/@id')
+                $tgtNode  = $tNode.SelectSingleNode('target/@id')
+                if (-not $cfgNode  -or $cfgNode.Value  -ne $ConfigId)  { $reasons.Add('scan config differs') }
+                if (-not $scanNode -or $scanNode.Value -ne $ScannerId) { $reasons.Add('scanner differs') }
+                if (-not $tgtNode) { $reasons.Add('task has no target') }
+
+                if ($tgtNode) {
+                    $tgt = Invoke-GvmGmpRequest @gmp -Xml ('<get_targets target_id="{0}"/>' -f $tgtNode.Value)
+                    $hostsNode = $tgt.SelectSingleNode('//target/hosts')
+                    $credNode  = $tgt.SelectSingleNode('//target/smb_credential/@id')
+                    # Normalise: GVM may re-order or re-space the stored host list.
+                    $tgtHosts = if ($hostsNode) { (($hostsNode.InnerText -split '[,\s]+' | Where-Object { $_ }) | Sort-Object) -join ',' } else { '' }
+                    if ($tgtHosts -ne $fingerprint) { $reasons.Add("target hosts differ (target has '$tgtHosts')") }
+                    if (-not $credNode -or $credNode.Value -ne $CredentialId) { $reasons.Add('target SMB credential differs') }
+                }
+
+                if ($reasons.Count -gt 0) {
+                    Write-Warning ("Recorded task {0} does not match this run ({1}); creating a new target and task instead." -f $prevTask, ($reasons -join '; '))
+                }
+                else {
+                    $reuseTaskId = $prevTask
+                    Write-Host "  host set unchanged and recorded task verified; reusing task $reuseTaskId"
+                }
+            }
         }
         catch { Write-Host "  could not verify the recorded task ($($_.Exception.Message)); creating a new one" }
     }

@@ -37,7 +37,9 @@ This module makes that credential valid only while a scan is running.
 - No standing enabled account. Between scans the AD account is disabled, so the credential fails
   even if the password were somehow correct. Two independent layers.
 - A tampered scheduled task fails closed rather than escalating, when combined with
-  `-ExecutionPolicy AllSigned` in the task action.
+  `-ExecutionPolicy AllSigned` in the task action. Note this protects *scripts*, not `config.psd1`:
+  that is data, not signed, so its directory must be admin-only. Parameters that reach a command
+  line (`ScannerHost`, `GmpHelper`) and every Greenbone UUID are pattern-validated for this reason.
 
 **What this does NOT fix — read this part**
 

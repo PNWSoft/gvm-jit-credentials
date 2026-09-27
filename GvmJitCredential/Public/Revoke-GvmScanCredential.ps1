@@ -56,7 +56,7 @@ function Revoke-GvmScanCredential {
         [Parameter(Mandatory, ParameterSetName = 'ByIdentity')]
         [string]$Identity,
 
-        [Parameter(ParameterSetName = 'ByIdentity')][string]$CredentialId = '',
+        [Parameter(ParameterSetName = 'ByIdentity')][ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$CredentialId = '',
         [Parameter(ParameterSetName = 'ByIdentity')][string]$ScannerHost  = '',
         [Parameter(ParameterSetName = 'ByIdentity')][string]$GmpHelper    = '',
         [Parameter(ParameterSetName = 'ByIdentity')][string]$IdentityFile = '',
@@ -70,16 +70,25 @@ function Revoke-GvmScanCredential {
     )
 
     if ($PSCmdlet.ParameterSetName -eq 'ByGrant') {
-        $Identity     = [string](Get-ObjectProperty $Grant 'Identity' '')
-        $CredentialId = [string](Get-ObjectProperty $Grant 'CredentialId' '')
+        # Read everything into locals FIRST and validate here. A ValidatePattern attribute on a
+        # parameter also fires on later assignments to that variable, so assigning a malformed value
+        # straight from the grant record would raise an opaque "variable cannot be validated" error
+        # -- and would do so before the Identity check below, hiding the more useful diagnosis.
+        $gIdentity = [string](Get-ObjectProperty $Grant 'Identity' '')
+        $gCred     = [string](Get-ObjectProperty $Grant 'CredentialId' '')
+        if (-not $gIdentity) {
+            throw 'The supplied -Grant object has no Identity. Pass -Identity explicitly instead.'
+        }
+        if ($gCred -and $gCred -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+            throw "The supplied -Grant object has a CredentialId that is not a UUID: '$gCred'"
+        }
+        $Identity     = $gIdentity
+        $CredentialId = $gCred
         $ScannerHost  = [string](Get-ObjectProperty $Grant 'ScannerHost' '')
         $GmpHelper    = [string](Get-ObjectProperty $Grant 'GmpHelper' '')
         $IdentityFile = [string](Get-ObjectProperty $Grant 'IdentityFile' '')
         $Server       = [string](Get-ObjectProperty $Grant 'Server' '')
         $LogSource    = [string](Get-ObjectProperty $Grant 'LogSource' $LogSource)
-        if (-not $Identity) {
-            throw 'The supplied -Grant object has no Identity. Pass -Identity explicitly instead.'
-        }
     }
 
     if (-not $Server) {

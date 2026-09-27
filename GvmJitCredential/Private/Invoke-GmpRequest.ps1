@@ -22,8 +22,17 @@ function Invoke-GmpRequest {
     [OutputType([xml])]
     param(
         [Parameter(Mandatory)][string]$Xml,
-        [Parameter(Mandatory)][string]$ScannerHost,
-        [Parameter(Mandatory)][string]$GmpHelper,
+        # Validated, because both end up on ssh's command line. A value beginning with '-' would
+        # otherwise be parsed as an option: -oProxyCommand=<payload> runs arbitrary code as the
+        # CALLING account, which is the runner holding the AD delegation and the SSH key.
+        # The user@ part is optional: a bare host relying on an ssh_config User directive is valid.
+        [Parameter(Mandatory)]
+        [ValidatePattern('^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+$')]
+        [string]$ScannerHost,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^/[A-Za-z0-9._/-]+$')]
+        [string]$GmpHelper,
         [string]$IdentityFile = '',
         [int]$ConnectTimeoutSeconds = 15,
         # Accepted statuses. 200 = OK; start_task answers 202 Accepted.
@@ -36,7 +45,10 @@ function Invoke-GmpRequest {
 
     $sshArgs = @('-o','BatchMode=yes','-o',"ConnectTimeout=$ConnectTimeoutSeconds")
     if ($IdentityFile) { $sshArgs += @('-o','IdentitiesOnly=yes','-i',$IdentityFile) }
-    $sshArgs += @($ScannerHost, $GmpHelper)
+    # '--' terminates option parsing, so even if the validation above is ever loosened a
+    # leading-dash value cannot become an ssh option. Verified: ssh accepts '--' and then rejects
+    # '-oProxyCommand=...' as an invalid hostname rather than honouring it.
+    $sshArgs += @('--', $ScannerHost, $GmpHelper)
 
     # STDERR goes to a file rather than $null. BatchMode=yes makes ssh fail SILENTLY on a missing
     # key or an unknown host key, so discarding stderr turns "Host key verification failed" into
