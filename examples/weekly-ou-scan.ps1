@@ -24,6 +24,11 @@
   takes the first IPv4. Without it, a host with a public and a private address may be scanned on the
   wrong interface.
 
+.PARAMETER StateFile
+  Remembers the host set and task UUID from the previous run. When the host set is unchanged the
+  existing task is started again, so scan history accumulates under one task instead of leaving a
+  dead task and target behind every run. Delete the file to force a fresh task.
+
 .PARAMETER AlertId
   Optional Greenbone alert UUID to attach to the per-run task. It MUST be passed here: because each
   run creates a new task, an alert attached to a previous task does not carry over. Omitting it is a
@@ -51,6 +56,9 @@ param(
     [string]$TargetSubnet = '',
     [string]$AlertId = '',
     [string]$IdentityFile = '',
+    # Records the host set and task UUID from the last run, so an unchanged host set can reuse
+    # its task instead of orphaning one per run. Delete it to force a fresh task.
+    [string]$StateFile = 'C:\ProgramData\GvmJit\weekly-ou-scan.state.psd1',
     [string]$TargetNamePrefix = 'JIT auto target',
     [string]$TaskNamePrefix = 'JIT weekly scan',
     [int]$ReplicationDelaySeconds = 45,
@@ -106,6 +114,49 @@ if (-not $PSCmdlet.ShouldProcess("$($ipList.Count) host(s) via '$Identity'", 'Gr
     return
 }
 
+# --- Reuse an existing task when the host set has not changed.
+#
+# VERIFIED on a live instance: modify_task can change a task's target only while the task is New.
+# Once it has run, GMP answers 400 "Status must be New to edit Target". So a task is locked to its
+# host set after its first run, and a NEW task is needed only when that set actually changes.
+#
+# Creating one unconditionally, as the obvious implementation does, leaves a dead task and target
+# behind every single run -- 52 a year, each holding a report that any "latest report per task"
+# query will treat as current. Reusing the task when the hosts are identical keeps the scan history
+# together under one task, which is both tidier and what downstream queries expect.
+$fingerprint = ($ipList -join ',')
+$state = $null
+if ($StateFile -and (Test-Path -LiteralPath $StateFile)) {
+    try { $state = Import-PowerShellDataFile -LiteralPath $StateFile }
+    catch { Write-Warning "Could not read $StateFile ($($_.Exception.Message)); treating this as a first run." }
+}
+
+$reuseTaskId = ''
+if ($state) {
+    # Import-PowerShellDataFile returns a hashtable; ContainsKey keeps this safe under StrictMode
+    # and tolerant of a state file written by an older version.
+    $prevHosts = if ($state.ContainsKey('Hosts'))  { [string]$state['Hosts'] }  else { '' }
+    $prevTask  = if ($state.ContainsKey('TaskId')) { [string]$state['TaskId'] } else { '' }
+    if ($prevHosts -eq $fingerprint -and $prevTask) {
+        # Confirm it still exists: someone may have deleted it in GSA, and starting a missing task
+        # would fail after the credential is already live.
+        try {
+            $chk = Invoke-GvmGmpRequest @gmp -Xml ('<get_tasks task_id="{0}"/>' -f $prevTask)
+            if ($chk.SelectSingleNode('//task/name')) {
+                $reuseTaskId = $prevTask
+                Write-Host "  host set unchanged; reusing task $reuseTaskId"
+            }
+            else { Write-Host '  recorded task no longer exists; creating a new one' }
+        }
+        catch { Write-Host "  could not verify the recorded task ($($_.Exception.Message)); creating a new one" }
+    }
+    elseif ($prevHosts -ne $fingerprint) {
+        Write-Host '  host set CHANGED since the last run; a new target and task are required'
+        Write-Host "    was: $prevHosts"
+        Write-Host "    now: $fingerprint"
+    }
+}
+
 $stamp = '{0:yyyyMMdd-HHmmss}' -f (Get-Date)
 $script:taskId = ''
 $script:targetId = ''
@@ -116,20 +167,25 @@ $result = Invoke-GvmJitScan -Identity $Identity -CredentialId $CredentialId `
     -ScanAction {
         param($grant)
 
-        # create_target answers 201.
-        $targetXml = '<create_target><name>{0}</name><hosts>{1}</hosts><port_list id="{2}"/><smb_credential id="{3}"/></create_target>' -f
-            (ConvertTo-GvmGmpText ("$TargetNamePrefix $stamp")), ($ipList -join ','), $PortListId, $CredentialId
-        $doc = Invoke-GvmGmpRequest @gmp -Xml $targetXml -ExpectStatus 200, 201
-        $script:targetId = $doc.DocumentElement.GetAttribute('id')
-        if (-not $script:targetId) { throw "create_target returned no id" }
+        if ($reuseTaskId) {
+            $script:taskId = $reuseTaskId
+        }
+        else {
+            # create_target answers 201.
+            $targetXml = '<create_target><name>{0}</name><hosts>{1}</hosts><port_list id="{2}"/><smb_credential id="{3}"/></create_target>' -f
+                (ConvertTo-GvmGmpText ("$TargetNamePrefix $stamp")), ($ipList -join ','), $PortListId, $CredentialId
+            $doc = Invoke-GvmGmpRequest @gmp -Xml $targetXml -ExpectStatus 200, 201
+            $script:targetId = $doc.DocumentElement.GetAttribute('id')
+            if (-not $script:targetId) { throw 'create_target returned no id' }
 
-        $alertXml = if ($AlertId) { '<alert id="{0}"/>' -f $AlertId } else { '' }
-        $taskXml = '<create_task><name>{0}</name><config id="{1}"/><target id="{2}"/><scanner id="{3}"/>{4}</create_task>' -f
-            (ConvertTo-GvmGmpText ("$TaskNamePrefix $stamp")), $ConfigId, $script:targetId, $ScannerId, $alertXml
-        $doc = Invoke-GvmGmpRequest @gmp -Xml $taskXml -ExpectStatus 200, 201
-        $script:taskId = $doc.DocumentElement.GetAttribute('id')
-        if (-not $script:taskId) { throw "create_task returned no id" }
-        Write-Host "  created target $($script:targetId) and task $($script:taskId)"
+            $alertXml = if ($AlertId) { '<alert id="{0}"/>' -f $AlertId } else { '' }
+            $taskXml = '<create_task><name>{0}</name><config id="{1}"/><target id="{2}"/><scanner id="{3}"/>{4}</create_task>' -f
+                (ConvertTo-GvmGmpText ("$TaskNamePrefix $stamp")), $ConfigId, $script:targetId, $ScannerId, $alertXml
+            $doc = Invoke-GvmGmpRequest @gmp -Xml $taskXml -ExpectStatus 200, 201
+            $script:taskId = $doc.DocumentElement.GetAttribute('id')
+            if (-not $script:taskId) { throw 'create_task returned no id' }
+            Write-Host "  created target $($script:targetId) and task $($script:taskId)"
+        }
 
         # start_task answers 202.
         $null = Invoke-GvmGmpRequest @gmp -Xml ('<start_task task_id="{0}"/>' -f $script:taskId) -ExpectStatus 200, 202
@@ -165,6 +221,24 @@ catch { Write-Warning "Could not read the report id back: $($_.Exception.Message
 "Report   : $(if ($reportNode) { $reportNode.GetAttribute('id') } else { 'unknown' })"
 "Duration : $($result.Duration)"
 "Revoked  : disabled=$($result.Revoke.Disabled) passwordReset=$($result.Revoke.PasswordReset) greenboneBlanked=$($result.Revoke.GreenboneBlanked)"
+
+# Record the host set and task for the next run. Written only after the scan reached a terminal
+# state: recording a task that failed to start would make the next run reuse something unusable.
+if ($StateFile -and $script:taskId) {
+    try {
+        $dir = Split-Path -Parent $StateFile
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        $content = @"
+@{
+    # Written by weekly-ou-scan.ps1 on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    Hosts  = '$fingerprint'
+    TaskId = '$($script:taskId)'
+}
+"@
+        [IO.File]::WriteAllText($StateFile, ($content -replace "`r?`n", "`r`n"), [Text.Encoding]::ASCII)
+    }
+    catch { Write-Warning "Could not write $StateFile ($($_.Exception.Message)); the next run will create a new task." }
+}
 if ($result.Revoke.Warnings.Count -gt 0) { $result.Revoke.Warnings | ForEach-Object { Write-Warning $_ } }
 
 # Exit codes the scheduled task can act on.
