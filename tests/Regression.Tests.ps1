@@ -280,21 +280,30 @@ Describe 'Write-JitLog source resolution' {
     # throws for a non-existent source whenever the caller cannot enumerate all event logs -- which
     # a low-privilege runner cannot. One missing source must produce one warning, not one per event.
     It 'checks the source once per session, not once per call' {
+        # Deliberately does NOT pre-initialise the module's state variables. An earlier version of
+        # this test set $script:JitLogSourceChecked itself, which masked a real defect: under
+        # StrictMode, READING an unset $script: variable throws, so production failed with
+        # "The variable ... has not been set" while the test passed. Import fresh instead.
+        Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psm1') -Force
         InModuleScope GvmJitCredential {
-            $script:JitLogSourceChecked = $null
-            $script:calls = 0
-            Mock Write-Host {}
-            # Simulate the restricted-token behaviour: SourceExists throws every time.
-            Mock Write-EventLog {}
-            $sourceProbe = 0
-            # Drive several log lines and assert the warning text appears at most once.
             $warnings = [System.Collections.Generic.List[string]]::new()
-            Mock Write-Host { $warnings.Add([string]$Object) } -ParameterFilter { $true }
+            Mock Write-Host { $warnings.Add([string]$Object) }
+            Mock Write-EventLog {}
             1..5 | ForEach-Object { Write-JitLog "line $_" 1000 'Information' 'NoSuchSource-GvmJitTest' }
-            $warned = @($warnings | Where-Object { $_ -match 'event log source|cannot verify event log source' })
+            $warned = @($warnings | Where-Object { $_ -match 'event log source' })
             $warned.Count | Should -BeLessOrEqual 1
-            # every line still reached the output stream
             @($warnings | Where-Object { $_ -match '^\[Information\] line' }).Count | Should -Be 5
+        }
+    }
+
+    It 'does not throw on the very first call with module state unset' {
+        # The regression itself: a fresh module + first Write-JitLog must not raise a StrictMode
+        # "variable has not been set" error.
+        Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psm1') -Force
+        InModuleScope GvmJitCredential {
+            Mock Write-Host {}
+            Mock Write-EventLog {}
+            { Write-JitLog 'first call' 1000 'Information' 'NoSuchSource-GvmJitTest2' } | Should -Not -Throw
         }
     }
 }

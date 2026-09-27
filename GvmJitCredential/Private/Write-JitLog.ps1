@@ -1,3 +1,11 @@
+# Module-scope state for the event-source check, declared at load time. Under
+# Set-StrictMode -Version Latest, READING an unset $script: variable throws, so without these a
+# scheduled-task run failed with "The variable '$script:JitLogSourceChecked' cannot be retrieved
+# because it has not been set" instead of logging. Private/*.ps1 are dot-sourced into the module, so
+# a top-level assignment here is module scope.
+$script:JitLogSourceChecked = ''
+$script:JitLogSourceUsable  = $false
+
 function Write-JitLog {
     <#
     .SYNOPSIS
