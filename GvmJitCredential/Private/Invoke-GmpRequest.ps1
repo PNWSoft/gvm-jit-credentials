@@ -35,6 +35,8 @@ function Invoke-GmpRequest {
         [string]$GmpHelper,
         [string]$IdentityFile = '',
         [int]$ConnectTimeoutSeconds = 15,
+        [int]$ServerAliveIntervalSeconds = 15,
+        [int]$ServerAliveCountMax = 4,
         # Accepted statuses. 200 = OK; start_task answers 202 Accepted.
         [string[]]$ExpectStatus = @('200')
     )
@@ -43,7 +45,17 @@ function Invoke-GmpRequest {
         throw "IdentityFile not found: $IdentityFile"
     }
 
-    $sshArgs = @('-o','BatchMode=yes','-o',"ConnectTimeout=$ConnectTimeoutSeconds")
+    # ServerAliveInterval/CountMax are load-bearing, not tuning. ConnectTimeout bounds only the
+    # CONNECTION; if the scanner crashes or a stateful firewall drops the flow mid-poll, ssh blocks on
+    # read (Windows TCP keepalive defaults to hours), and -MaxScanMinutes cannot save us because its
+    # deadline check lives inside the poll loop that is itself blocked. The account would stay ENABLED
+    # with a live password until the backstop task fires. 15s x 4 bounds that at about a minute.
+    $sshArgs = @(
+        '-o', 'BatchMode=yes'
+        '-o', "ConnectTimeout=$ConnectTimeoutSeconds"
+        '-o', "ServerAliveInterval=$ServerAliveIntervalSeconds"
+        '-o', "ServerAliveCountMax=$ServerAliveCountMax"
+    )
     if ($IdentityFile) { $sshArgs += @('-o','IdentitiesOnly=yes','-i',$IdentityFile) }
     # '--' terminates option parsing, so even if the validation above is ever loosened a
     # leading-dash value cannot become an ssh option. Verified: ssh accepts '--' and then rejects

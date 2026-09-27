@@ -7,7 +7,7 @@
 #>
 
 BeforeAll {
-    $ModulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psm1'
+    $ModulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psd1'
     Import-Module $ModulePath -Force
 }
 
@@ -242,11 +242,14 @@ Describe 'ScanAction scope contract' {
 
 Describe 'Input validation at the boundary' {
     It 'rejects a ScannerHost that ssh would parse as an option' {
-        # -oProxyCommand=<payload> would execute code as the calling account. Blocked by pattern,
-        # and '--' in the ssh argument list is the second line of defence.
+        # Asserts the PARAMETER BINDING failed, not merely that something threw. A bare -Throw passes
+        # even with the ValidatePattern removed, because the call then reaches real ssh, fails to
+        # resolve the hostname '-oProxyCommand=calc' and throws "No response from the GMP helper" --
+        # green test, absent defence. Stub ssh too, so no fallback can supply the exception.
         InModuleScope GvmJitCredential {
+            function ssh { '<r status="200"/>' }
             { Invoke-GmpRequest -Xml '<x/>' -ScannerHost '-oProxyCommand=calc' -GmpHelper '/opt/gvm/gmp.sh' } |
-                Should -Throw
+                Should -Throw -ExceptionType ([System.Management.Automation.ParameterBindingException])
         }
     }
 
@@ -260,13 +263,20 @@ Describe 'Input validation at the boundary' {
 
     It 'rejects a GmpHelper that is not an absolute path' {
         InModuleScope GvmJitCredential {
-            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'a@b' -GmpHelper '-oProxyCommand=calc' } | Should -Throw
+            function ssh { '<r status="200"/>' }
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'a@b' -GmpHelper '-oProxyCommand=calc' } |
+                Should -Throw -ExceptionType ([System.Management.Automation.ParameterBindingException])
         }
     }
 
     It 'rejects a CredentialId that is not a UUID' {
+        # Resolve-JitDomainController runs before ShouldProcess, so on a machine without RSAT this
+        # test passed from THAT exception even with the pattern removed. Mock it away and assert the
+        # binding exception specifically.
+        Mock -ModuleName GvmJitCredential Resolve-JitDomainController { 'dc1.example.local' }
         { Grant-GvmScanCredential -Identity a -CredentialId 'not-a-uuid' `
-              -ScannerHost 'a@b' -GmpHelper '/opt/gvm/gmp.sh' -WhatIf } | Should -Throw
+              -ScannerHost 'a@b' -GmpHelper '/opt/gvm/gmp.sh' -WhatIf } |
+            Should -Throw -ExceptionType ([System.Management.Automation.ParameterBindingException])
     }
 
     It 'gives a clear message for a grant record whose CredentialId is not a UUID' {
@@ -284,7 +294,7 @@ Describe 'Write-JitLog source resolution' {
         # this test set $script:JitLogSourceChecked itself, which masked a real defect: under
         # StrictMode, READING an unset $script: variable throws, so production failed with
         # "The variable ... has not been set" while the test passed. Import fresh instead.
-        Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psm1') -Force
+        Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psd1') -Force
         InModuleScope GvmJitCredential {
             $warnings = [System.Collections.Generic.List[string]]::new()
             Mock Write-Host { $warnings.Add([string]$Object) }
@@ -299,7 +309,7 @@ Describe 'Write-JitLog source resolution' {
     It 'does not throw on the very first call with module state unset' {
         # The regression itself: a fresh module + first Write-JitLog must not raise a StrictMode
         # "variable has not been set" error.
-        Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psm1') -Force
+        Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psd1') -Force
         InModuleScope GvmJitCredential {
             Mock Write-Host {}
             Mock Write-EventLog {}

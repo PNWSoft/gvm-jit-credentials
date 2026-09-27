@@ -11,7 +11,7 @@
 #>
 
 BeforeAll {
-    $ModulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psm1'
+    $ModulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psd1'
     Import-Module $ModulePath -Force
 }
 

@@ -42,11 +42,22 @@ $ErrorActionPreference = 'Stop'
 Import-Module $ModulePath -Force
 $cfg = Import-PowerShellDataFile -Path $ConfigPath
 
-$result = Invoke-GvmJitScan -Identity $cfg.Identity -CredentialId $cfg.CredentialId `
-    -TaskId $cfg.TaskId -ScannerHost $cfg.ScannerHost -GmpHelper $cfg.GmpHelper `
-    -IdentityFile $cfg.IdentityFile `
-    -ReplicationDelaySeconds $cfg.ReplicationDelaySeconds `
-    -PollSeconds $cfg.PollSeconds -MaxScanMinutes $cfg.MaxScanMinutes `
+# Read config keys through a helper. Under Set-StrictMode -Version Latest, $cfg.Missing on a hashtable
+# raises PropertyNotFoundStrict, so a single omitted key turned a config typo into "this task throws
+# before doing anything" -- for the backstop, that means it never revokes. Required keys are named
+# explicitly so the error says which one is missing.
+function Get-Cfg {
+    param([string]$Key, $Default = $null, [switch]$Required)
+    if ($cfg.ContainsKey($Key) -and $null -ne $cfg[$Key] -and "$($cfg[$Key])" -ne '') { return $cfg[$Key] }
+    if ($Required) { throw "Config '$ConfigPath' is missing required key '$Key'." }
+    return $Default
+}
+
+$result = Invoke-GvmJitScan -Identity (Get-Cfg 'Identity' -Required) -CredentialId (Get-Cfg 'CredentialId' -Required) `
+    -TaskId (Get-Cfg 'TaskId' -Required) -ScannerHost (Get-Cfg 'ScannerHost' -Required) -GmpHelper (Get-Cfg 'GmpHelper' -Required) `
+    -IdentityFile (Get-Cfg 'Identity' -Required)File `
+    -ReplicationDelaySeconds (Get-Cfg 'ReplicationDelaySeconds' 45) `
+    -PollSeconds (Get-Cfg 'PollSeconds' 30) -MaxScanMinutes (Get-Cfg 'MaxScanMinutes' 300) `
     -LogSource $LogSource
 
 "Scan status : $($result.Status)"

@@ -43,11 +43,22 @@ $ErrorActionPreference = 'Stop'
 Import-Module $ModulePath -Force
 $cfg = Import-PowerShellDataFile -Path $ConfigPath
 
+# Read config keys through a helper. Under Set-StrictMode -Version Latest, $cfg.Missing on a hashtable
+# raises PropertyNotFoundStrict, so a single omitted key turned a config typo into "this task throws
+# before doing anything" -- for the backstop, that means it never revokes. Required keys are named
+# explicitly so the error says which one is missing.
+function Get-Cfg {
+    param([string]$Key, $Default = $null, [switch]$Required)
+    if ($cfg.ContainsKey($Key) -and $null -ne $cfg[$Key] -and "$($cfg[$Key])" -ne '') { return $cfg[$Key] }
+    if ($Required) { throw "Config '$ConfigPath' is missing required key '$Key'." }
+    return $Default
+}
+
 # -Strict: here we DO want a throw, so the scheduled task reports failure.
 # Assigned rather than left on the pipeline: emitting the result object dumps a Format-List with
 # blank lines into the task log, burying the event lines that actually matter.
-$r = Revoke-GvmScanCredential -Identity $cfg.Identity -CredentialId $cfg.CredentialId `
-    -ScannerHost $cfg.ScannerHost -GmpHelper $cfg.GmpHelper -IdentityFile $cfg.IdentityFile `
+$r = Revoke-GvmScanCredential -Identity (Get-Cfg 'Identity' -Required) -CredentialId (Get-Cfg 'CredentialId' -Required) `
+    -ScannerHost (Get-Cfg 'ScannerHost' -Required) -GmpHelper (Get-Cfg 'GmpHelper' -Required) -IdentityFile (Get-Cfg 'Identity' -Required)File `
     -LogSource $LogSource -Strict
 
 "Backstop revoke for '$($r.Identity)' via $($r.Server)"

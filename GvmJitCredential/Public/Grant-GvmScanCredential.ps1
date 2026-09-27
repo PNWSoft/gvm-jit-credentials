@@ -72,7 +72,6 @@ function Grant-GvmScanCredential {
     Write-JitLog "JIT grant starting for '$Identity'" 1000 'Information' $LogSource
 
     Set-JitAccountEnabled -Identity $Identity -Enabled $true -Server $Server
-    Write-JitLog "Account '$Identity' ENABLED" 1001 'Information' $LogSource
 
     # From here on the account is ENABLED. Any failure below must undo that before rethrowing:
     # an enabled account with a live (or unknown) password is the exact state this module exists to
@@ -80,6 +79,12 @@ function Grant-GvmScanCredential {
     $password = $null
     $body = $null
     try {
+        # Inside the try, deliberately. Write-JitLog cannot throw today, but the StrictMode incident
+        # that produced this comment WAS Write-JitLog throwing -- it merely happened to fire before
+        # the enable. Logging the enable from outside the protected region would mean a throw here
+        # leaves the account ENABLED with no rollback and no grant record for the caller to clean up.
+        Write-JitLog "Account '$Identity' ENABLED" 1001 'Information' $LogSource
+
         $password = New-EphemeralPassword -Length $PasswordLength
         Set-JitAccountPassword -Identity $Identity -Password $password -Server $Server
         Write-JitLog 'Password rotated in AD' 1002 'Information' $LogSource

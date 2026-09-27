@@ -1,4 +1,15 @@
+# Deployment-specific, never published: these hold real UUIDs, hostnames and state.
 config.psd1
 *.local.psd1
+*.state.psd1
 .gmp.env
 *.log
+
+# Working notes and local agent configuration -- a tool for the maintainer, not a release artifact.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
+# Signing output: the certificate is public, but it is deployment-specific and the signature blocks
+# do not belong in source control.
+*.cer

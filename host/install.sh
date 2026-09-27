@@ -26,9 +26,17 @@ install -m 0700 -o root -g root "$SRC_DIR/gmp-relay.sh" "$PREFIX/gmp-relay.sh"
 echo "  installed $PREFIX/gmp.sh (0755) and $PREFIX/gmp-relay.sh (0700 root)"
 
 # The stub has the relay path baked in; keep them consistent if PREFIX was overridden.
+# Both the stub's hardcoded relay path AND the relay's own default GMP_ENV point at /opt/greenbone.
+# Rewriting only the first left a relay that could not read its own credentials file and failed every
+# request with "cannot read /opt/greenbone/.gmp.env".
 if [ "$PREFIX" != "/opt/greenbone" ]; then
     sed -i "s|/opt/greenbone/gmp-relay.sh|$PREFIX/gmp-relay.sh|" "$PREFIX/gmp.sh"
-    echo "  rewrote the relay path in gmp.sh for PREFIX=$PREFIX"
+    sed -i "s|GMP_ENV=\"\${GMP_ENV:-/opt/greenbone/.gmp.env}\"|GMP_ENV=\"\${GMP_ENV:-$PREFIX/.gmp.env}\"|" "$PREFIX/gmp-relay.sh"
+    echo "  rewrote the relay path in gmp.sh and GMP_ENV in gmp-relay.sh for PREFIX=$PREFIX"
+    grep -q "GMP_ENV:-$PREFIX/.gmp.env" "$PREFIX/gmp-relay.sh" || {
+        echo "  ERROR: failed to rewrite GMP_ENV in gmp-relay.sh; the relay would not find its credentials" >&2
+        exit 1
+    }
 fi
 
 if [ -e "$PREFIX/.gmp.env" ]; then
