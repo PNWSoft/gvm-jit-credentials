@@ -150,6 +150,32 @@ The recorded task is verified before reuse — scan config, scanner, target host
 must all match this run — because the state file is unsigned data that names something this tool is
 about to start *with the credential live*. Existence alone is not enough.
 
+## Domain controllers
+
+This tool's scan account is not intended for domain controllers, and `examples/weekly-ou-scan.ps1`
+assumes they are out of scope.
+
+The reason is mechanical rather than a matter of taste. A DC has no separate local account database,
+so its `BUILTIN\Administrators` is the domain's group: adding an account to "local Administrators" on
+a DC grants administrative control over the directory and every DC, not just that machine. Whatever
+you think of scanning DCs authenticated, a credential that a scanner stores and replays over SMB is a
+poor candidate for that level of access, and narrowing the *window* does not change what the access
+is. `examples/Add-ScanAccountLocalAdmin.ps1` refuses to run if a domain controller appears in the OU
+you point it at, for that reason.
+
+A common approach — the one this was extracted from — is to keep DCs free of third-party software and
+scan them **unauthenticated**, as a separate task with its own target. Where that holds, Microsoft
+Update plus an unauthenticated scan gives many people decent coverage, because a good deal of what
+authenticated scanning adds is third-party patch and configuration detail that is not present to find.
+
+How well that generalises depends on your estate. DCs that do run third-party software — backup
+agents, monitoring, AV management, PKI or HSM tooling — have more that an unauthenticated scan will not
+see, and the gap may matter to you. There are reasonable answers other than authenticating this
+account into a DC: a separate process for tier-0 with its own credential handling and controls,
+agent-based assessment, or accepting a known gap deliberately. Which of those fits is your call; the
+point here is only that this tool does not try to be that answer, and its example scripts assume you
+have made the decision elsewhere.
+
 ## Scope
 
 v1 covers exactly one configuration, because it is the only one that has been tested:
