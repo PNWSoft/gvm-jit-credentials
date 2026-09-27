@@ -1,0 +1,8 @@
+# PowerShell files MUST check out with CRLF on Windows. signtool appends its signature block
+# assuming CRLF; on an LF-only .ps1 it silently eats the final line, producing a file that
+# reports "Status: Valid" yet fails to parse with MissingEndCurlyBrace. Learned the hard way.
+*.ps1   text eol=crlf
+*.psd1  text eol=crlf
+*.psm1  text eol=crlf
+*.sh    text eol=lf
+*.md    text

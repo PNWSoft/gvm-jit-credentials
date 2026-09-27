@@ -1,0 +1,4 @@
+config.psd1
+*.local.psd1
+.gmp.env
+*.log

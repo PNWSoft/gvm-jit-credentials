@@ -1,0 +1,81 @@
+function Invoke-GmpRequest {
+    <#
+    .SYNOPSIS
+      Sends one GMP request to the scanner over SSH stdin and returns the parsed response.
+
+    .DESCRIPTION
+      The request travels on STDIN, never on the command line, so a password in a
+      <modify_credential> payload never appears in argv, in `ps` output on the scanner, or in
+      shell history on either end. This is the whole reason for the host-side helper script
+      (host/gmp.sh) instead of calling `gvm-cli --gmp-password` directly.
+
+      The response is parsed as XML and the status attribute is checked. Regex-matching the raw
+      text for status="200" happens to work but is fragile: a nested element can carry the same
+      attribute, so a failed call whose body quotes a successful one would read as success.
+
+    .PARAMETER IdentityFile
+      Explicit SSH private key. Strongly recommended: without it, ssh resolves the key from the
+      CALLING account's ~/.ssh, so the same code succeeds under the scheduled task and fails when
+      a human runs it by hand -- a confusing difference to debug.
+    #>
+    [CmdletBinding()]
+    [OutputType([xml])]
+    param(
+        [Parameter(Mandatory)][string]$Xml,
+        [Parameter(Mandatory)][string]$ScannerHost,
+        [Parameter(Mandatory)][string]$GmpHelper,
+        [string]$IdentityFile = '',
+        [int]$ConnectTimeoutSeconds = 15,
+        # Accepted statuses. 200 = OK; start_task answers 202 Accepted.
+        [string[]]$ExpectStatus = @('200')
+    )
+
+    if ($IdentityFile -and -not (Test-Path -LiteralPath $IdentityFile)) {
+        throw "IdentityFile not found: $IdentityFile"
+    }
+
+    $sshArgs = @('-o','BatchMode=yes','-o',"ConnectTimeout=$ConnectTimeoutSeconds")
+    if ($IdentityFile) { $sshArgs += @('-o','IdentitiesOnly=yes','-i',$IdentityFile) }
+    $sshArgs += @($ScannerHost, $GmpHelper)
+
+    # STDERR goes to a file rather than $null. BatchMode=yes makes ssh fail SILENTLY on a missing
+    # key or an unknown host key, so discarding stderr turns "Host key verification failed" into
+    # an empty response and sends you hunting in the wrong place.
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $prev = $ErrorActionPreference
+    # In PS 5.1 a native command writing to STDERR raises a terminating NativeCommandError when
+    # $ErrorActionPreference is 'Stop'. The relay emits docker progress on STDERR, so localise to
+    # 'Continue'; success is judged solely by the parsed status below.
+    $ErrorActionPreference = 'Continue'
+    try {
+        $response = $Xml | & ssh @sshArgs 2>$errFile
+        $sshExit  = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+
+    $stderr = ''
+    if (Test-Path -LiteralPath $errFile) {
+        $stderr = [string](Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+    $stderr = $stderr.Trim()
+
+    $text = [string]$response
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        $detail = if ($stderr) { "ssh exit ${sshExit}: $stderr" } else { "ssh exit $sshExit, nothing on stderr" }
+        throw "No response from the GMP helper ($GmpHelper on $ScannerHost). $detail"
+    }
+
+    try { $doc = [xml]$text }
+    catch {
+        $excerpt = $text.Substring(0, [Math]::Min(300, $text.Length))
+        throw "GMP returned unparseable XML: $excerpt"
+    }
+
+    $status = $doc.DocumentElement.GetAttribute('status')
+    if ($ExpectStatus -notcontains $status) {
+        throw ("GMP {0} failed: status={1} {2}" -f $doc.DocumentElement.Name, $status, $doc.DocumentElement.GetAttribute('status_text'))
+    }
+    return $doc
+}

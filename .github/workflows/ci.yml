@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  powershell:
+    name: PowerShell (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows PowerShell 5.1 is the deployment runtime and parses differently from 7.x --
+        # constructs that are fine in pwsh can fail there. Both must pass.
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse every script
+        shell: ${{ matrix.shell }}
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Include *.ps1,*.psm1,*.psd1 | Sort-Object FullName | ForEach-Object {
+            $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e)
+            if ($e) {
+              $bad++
+              Write-Host "FAIL $($_.FullName):$($e[0].Extent.StartLineNumber) $($e[0].Message)"
+            }
+          }
+          Write-Host "$PSVersionTable.PSVersion -- $bad file(s) failed to parse"
+          if ($bad -gt 0) { exit 1 }
+
+      - name: Validate module manifest
+        shell: ${{ matrix.shell }}
+        run: |
+          $m = Test-ModuleManifest ./GvmJitCredential/GvmJitCredential.psd1
+          Write-Host "$($m.Name) v$($m.Version): $($m.ExportedFunctions.Keys -join ', ')"
+
+      - name: Import module (no RSAT on the runner -- must still load)
+        shell: ${{ matrix.shell }}
+        run: |
+          Import-Module ./GvmJitCredential/GvmJitCredential.psd1 -Force
+          $n = (Get-Command -Module GvmJitCredential).Count
+          if ($n -lt 3) { throw "expected 3 exported functions, got $n" }
+          Write-Host "imported OK with $n exported functions"
+
+      - name: Pester
+        shell: ${{ matrix.shell }}
+        run: |
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          $c = New-PesterConfiguration
+          $c.Run.Path = './tests'
+          $c.Run.Exit = $true
+          $c.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $c
+
+  analyzer:
+    name: PSScriptAnalyzer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $r = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error,Warning -Settings ./PSScriptAnalyzerSettings.psd1
+          if ($r) { $r | Format-Table -AutoSize | Out-String | Write-Host; throw "$($r.Count) issue(s)" }
+          Write-Host 'PSScriptAnalyzer clean'
+
+  hygiene:
+    name: Hygiene (shellcheck, CRLF, no leaked config)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck && shellcheck host/*.sh
+
+      - name: PowerShell files must be CRLF
+        # signtool eats the last line of an LF-only .ps1, producing a signed file that reports
+        # Status: Valid and then fails to parse. .gitattributes enforces this on checkout; this
+        # step makes a regression a build failure rather than a mystery months later.
+        run: |
+          # Counting CR bytes against LF bytes. A regex like (?<!\r)\n cannot work here: grep
+          # strips the trailing newline before matching, so the pattern never fires and the gate
+          # silently passes everything. Verified against known-LF and known-CRLF fixtures.
+          bad=0
+          while IFS= read -r f; do
+            [ -s "$f" ] || continue
+            cr=$(tr -dc '\r' < "$f" | wc -c)
+            lf=$(tr -dc '\n' < "$f" | wc -c)
+            if [ "$cr" -ne "$lf" ]; then echo "not CRLF ($cr CR vs $lf LF): $f"; bad=1; fi
+          done < <(git ls-files '*.ps1' '*.psm1' '*.psd1')
+          [ "$bad" -eq 0 ] || { echo 'PowerShell files must use CRLF; see .gitattributes'; exit 1; }
+
+      - name: No environment-specific values committed
+        run: |
+          # The ':!' pathspec excludes this workflow from its own search: it necessarily
+          # contains the patterns it looks for and would fail every run otherwise.
+          if git grep -inE 'pnwsoft|REDACTED-ADDRESSES|REDACTED-HOST|greenbone-task|REDACTED-USER' -- \
+               '*.ps1' '*.psm1' '*.psd1' '*.sh' '*.md' '*.yml' ':!.github/workflows/ci.yml'; then
+            echo 'Environment-specific values must not be committed'; exit 1
+          fi
+          echo 'clean'
