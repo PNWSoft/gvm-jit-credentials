@@ -30,6 +30,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ConfigPath,
+    # Name the event source explicitly. The module's default is 'GvmJitCredential', which an
+    # existing deployment may never have created -- in which case the audit trail for this task
+    # goes to the log file only, and you find out by reading a warning rather than by noticing.
+    [string]$LogSource = 'GvmJitCredential',
     [string]$ModulePath = (Join-Path $PSScriptRoot '..\GvmJitCredential\GvmJitCredential.psd1')
 )
 
@@ -44,7 +48,7 @@ $cfg = Import-PowerShellDataFile -Path $ConfigPath
 # blank lines into the task log, burying the event lines that actually matter.
 $r = Revoke-GvmScanCredential -Identity $cfg.Identity -CredentialId $cfg.CredentialId `
     -ScannerHost $cfg.ScannerHost -GmpHelper $cfg.GmpHelper -IdentityFile $cfg.IdentityFile `
-    -Strict
+    -LogSource $LogSource -Strict
 
 "Backstop revoke for '$($r.Identity)' via $($r.Server)"
 "  disabled         : $($r.Disabled)"

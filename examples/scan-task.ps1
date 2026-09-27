@@ -29,6 +29,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ConfigPath,
+    # Name the event source explicitly. The module's default is 'GvmJitCredential', which an
+    # existing deployment may never have created -- in which case the audit trail for this task
+    # goes to the log file only, and you find out by reading a warning rather than by noticing.
+    [string]$LogSource = 'GvmJitCredential',
     [string]$ModulePath = (Join-Path $PSScriptRoot '..\GvmJitCredential\GvmJitCredential.psd1')
 )
 
@@ -42,7 +46,8 @@ $result = Invoke-GvmJitScan -Identity $cfg.Identity -CredentialId $cfg.Credentia
     -TaskId $cfg.TaskId -ScannerHost $cfg.ScannerHost -GmpHelper $cfg.GmpHelper `
     -IdentityFile $cfg.IdentityFile `
     -ReplicationDelaySeconds $cfg.ReplicationDelaySeconds `
-    -PollSeconds $cfg.PollSeconds -MaxScanMinutes $cfg.MaxScanMinutes
+    -PollSeconds $cfg.PollSeconds -MaxScanMinutes $cfg.MaxScanMinutes `
+    -LogSource $LogSource
 
 "Scan status : $($result.Status)"
 "Report id   : $($result.ReportId)"

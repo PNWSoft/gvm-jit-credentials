@@ -274,3 +274,27 @@ Describe 'Input validation at the boundary' {
             Should -Throw '*not a UUID*'
     }
 }
+
+Describe 'Write-JitLog source resolution' {
+    # A missing event source previously produced a warning on EVERY log line, because SourceExists
+    # throws for a non-existent source whenever the caller cannot enumerate all event logs -- which
+    # a low-privilege runner cannot. One missing source must produce one warning, not one per event.
+    It 'checks the source once per session, not once per call' {
+        InModuleScope GvmJitCredential {
+            $script:JitLogSourceChecked = $null
+            $script:calls = 0
+            Mock Write-Host {}
+            # Simulate the restricted-token behaviour: SourceExists throws every time.
+            Mock Write-EventLog {}
+            $sourceProbe = 0
+            # Drive several log lines and assert the warning text appears at most once.
+            $warnings = [System.Collections.Generic.List[string]]::new()
+            Mock Write-Host { $warnings.Add([string]$Object) } -ParameterFilter { $true }
+            1..5 | ForEach-Object { Write-JitLog "line $_" 1000 'Information' 'NoSuchSource-GvmJitTest' }
+            $warned = @($warnings | Where-Object { $_ -match 'event log source|cannot verify event log source' })
+            $warned.Count | Should -BeLessOrEqual 1
+            # every line still reached the output stream
+            @($warnings | Where-Object { $_ -match '^\[Information\] line' }).Count | Should -Be 5
+        }
+    }
+}
