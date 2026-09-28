@@ -349,7 +349,9 @@ The three scheduled-task entry points were re-verified as a signed deployment, r
 under `-ExecutionPolicy AllSigned`. What was observed live, as distinct from what is covered by tests:
 
 - **`backstop-task.ps1` — every documented code observed**: a clean revoke (0), a revoke whose
-  scanner-side overwrite failed while the AD side succeeded (3), and a revoke against a nonexistent
+  scanner-side overwrite failed while the AD side succeeded (3), a malformed `CredentialId` and a
+  config naming no scanner at all (3 each, with the AD revoke still performed — the case that matters,
+  since refusing to start would leave the account enabled), and a revoke against a nonexistent
   account (1).
 - **`scan-task.ps1` — the success path observed** (0), both fast and with an authenticated scan.
   Its 1, 2 and 3 are exercised in the test suite against a stub module, not live.
@@ -360,10 +362,21 @@ under `-ExecutionPolicy AllSigned`. What was observed live, as distinct from wha
 Authentication was confirmed from the scan report itself — `login/SMB/success: TRUE` — rather than from
 the scan merely finishing.
 
-Three defects were reachable only that way, and are worth knowing about if you adapt this: a partial
+Several defects were reachable only that way, and are worth knowing about if you adapt this: a partial
 revoke that reported success, an exit code made unreachable by `Write-Error` under
 `$ErrorActionPreference = 'Stop'`, and a registration example whose `-Command` wrapper discarded every
-exit code documented here. Each has a test, and each test was confirmed to fail with its fix reverted.
+exit code documented here.
+
+The one that matters most was self-inflicted and caught by audit rather than by testing. Forwarding
+`gvm-cli`'s stderr — added so that a wrong GMP password would stop looking like an SSH fault — opened a
+credential channel: `gvm-tools` validates the request *before* sending and prints the whole request on
+a parse error, which for a credential push contains the password, and that string became the thrown
+message the module writes to the Windows event log. The relay now redacts `<password>` elements where
+they are produced, `Invoke-GmpRequest` redacts again on arrival, and the relay no longer forwards the
+shell's own error when `.gmp.env` fails to parse, which leaked the same way by a different route. All
+three were verified with a canary password against the live relay, before and after.
+
+Each fix has a test, and each test was confirmed to fail with its fix reverted.
 
 That is not a claim of correctness — it is a statement that nothing here is untried, which for this
 kind of tool is the minimum bar. It supports one configuration for the same reason.
