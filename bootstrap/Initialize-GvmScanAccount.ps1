@@ -139,9 +139,10 @@ Write-Host "  is visible rather than silent: New-EventLog -LogName Application -
 Write-Host @"
 
 Next:
-  1. On the scanner host as root: create the Linux account the runner will SSH in as, run
-     host/install.sh (SCAN_ACCOUNT=<that account>), and fill in .gmp.env with a DEDICATED
-     low-privilege GMP user that you create in Greenbone yourself.
+  1. On the scanner host as root: create the Linux RELAY account the runner will SSH in as -- it is
+     not this AD scan account, which never logs in there -- run host/install.sh
+     (RELAY_ACCOUNT=<that account>), and fill in .gmp.env with a DEDICATED low-privilege GMP user that
+     you create in Greenbone yourself. Quote the password in that file; it is sourced by /bin/sh.
   2. Give the RUNNER account an SSH key to that Linux account, and populate the RUNNER account's
      known_hosts -- not yours. With BatchMode, ssh gives no prompt and exits 255 on an unknown host
      key. For a gMSA that usually means generating the key from a one-shot scheduled task running as

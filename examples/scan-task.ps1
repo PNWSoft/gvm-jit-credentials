@@ -33,17 +33,29 @@
         -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 01:00) `
         -Principal (New-ScheduledTaskPrincipal -UserId 'EXAMPLE\gvm-runner$' -LogonType Password -RunLevel Limited)
 
-  Exit codes (the backstop uses the same 0/1/3 meanings, so one convention covers both tasks):
+  Exit codes:
     0  scanned, and the credential fully revoked.
-    1  the credential revoked, but the scan did not reach Done -- a scan problem, not a security one.
+    1  anything else. Usually the scan: it did not reach Done, or it threw. It is also what an
+       exception before the scan produces -- a missing config key, a failed Import-Module, a Grant
+       that failed and rolled itself back. Those leave nothing usable behind, with ONE exception:
+       a grant whose rollback ALSO failed logs event 1903 and can leave the account ENABLED. So
+       check the log for 1903 before reading a 1 as a scan-only problem.
     2  the revoke reported errors. The account may still be usable: investigate NOW.
     3  scanned and revoked, but the scanner's stored copy was not overwritten (event 1010). Nothing
        usable is left behind; it points at a broken GMP path.
 
-  -ExecutionPolicy AllSigned in the task action is worth keeping even if the machine policy is
-  laxer: process scope wins, so a tampered or unsigned script cannot run under this task. It fails
-  closed. Note that it also means THIS file and the module must be signed with a certificate the
-  machine trusts.
+  backstop-task.ps1 shares 0 and 3, but NOT 1 and 2. It has no 2 -- its 1 is this script's 2, a
+  revoke that failed. Do not carry a single reading of "1" between the two.
+
+  -ExecutionPolicy AllSigned in the task action is worth keeping even if the machine policy is laxer:
+  the process scope beats the LocalMachine scope, so a tampered or unsigned script cannot run under
+  this task. It fails closed. It also means THIS file and the module must be signed with a certificate
+  the machine trusts.
+
+  The exception, which is exactly the case this is meant to cover: if execution policy comes from GROUP
+  POLICY, the MachinePolicy/UserPolicy scope overrides the command-line flag and it does nothing but
+  emit a warning. Check with Get-ExecutionPolicy -List; if a policy scope is set, AllSigned has to be
+  set there instead of here.
 #>
 [CmdletBinding()]
 param(
@@ -72,12 +84,32 @@ function Get-Cfg {
     return $Default
 }
 
-$result = Invoke-GvmJitScan -Identity (Get-Cfg 'Identity' -Required) -CredentialId (Get-Cfg 'CredentialId' -Required) `
-    -TaskId (Get-Cfg 'TaskId' -Required) -ScannerHost (Get-Cfg 'ScannerHost' -Required) -GmpHelper (Get-Cfg 'GmpHelper' -Required) `
-    -IdentityFile (Get-Cfg 'IdentityFile' '') `
-    -ReplicationDelaySeconds (Get-Cfg 'ReplicationDelaySeconds' 45) `
-    -PollSeconds (Get-Cfg 'PollSeconds' 30) -MaxScanMinutes (Get-Cfg 'MaxScanMinutes' 300) `
-    -LogSource $LogSource
+# Wrapped because a failing SCAN throws, and the revoke outcome rides out on the exception rather than
+# in a return value. Without this, "the scan died AND the account is still enabled" was reported as a
+# plain 1 -- the code documented below as not a security problem.
+try {
+    $result = Invoke-GvmJitScan -Identity (Get-Cfg 'Identity' -Required) -CredentialId (Get-Cfg 'CredentialId' -Required) `
+        -TaskId (Get-Cfg 'TaskId' -Required) -ScannerHost (Get-Cfg 'ScannerHost' -Required) -GmpHelper (Get-Cfg 'GmpHelper' -Required) `
+        -IdentityFile (Get-Cfg 'IdentityFile' '') `
+        -ReplicationDelaySeconds (Get-Cfg 'ReplicationDelaySeconds' 45) `
+        -PollSeconds (Get-Cfg 'PollSeconds' 30) -MaxScanMinutes (Get-Cfg 'MaxScanMinutes' 300) `
+        -LogSource $LogSource
+}
+catch {
+    # The scan failed. Whether that is merely a scan problem or a security one depends entirely on
+    # whether the revoke in its finally block succeeded, which is why that result is attached here.
+    $revoke = $_.Exception.Data['GvmJitRevoke']
+    Write-Warning "Scan failed: $($_.Exception.Message)"
+    if ($revoke -and $revoke.Errors.Count -gt 0) {
+        $revoke.Errors | ForEach-Object { Write-Error $_ -ErrorAction Continue }
+        exit 2      # the account may still be usable: this outranks the scan failure
+    }
+    # No revoke record (the grant itself failed, and rolled itself back) or a clean revoke. Either way
+    # the credential is not left usable by this path -- but check the log for event 1903 before
+    # assuming that, because a rollback that ALSO failed reaches here too.
+    $_ | Out-String | Write-Host
+    exit 1
+}
 
 "Scan status : $($result.Status)"
 "Report id   : $($result.ReportId)"

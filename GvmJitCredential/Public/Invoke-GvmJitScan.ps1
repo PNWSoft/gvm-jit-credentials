@@ -92,6 +92,7 @@ function Invoke-GvmJitScan {
     # a chance to run. Grant rolls itself back in that case, so $grant stays $null and the finally
     # skips -- but a future change to either function must not reintroduce an unprotected window.
     $grant = $null
+    $scanError = $null
     try {
         $grant = Grant-GvmScanCredential -Identity $Identity -CredentialId $CredentialId `
             -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `
@@ -123,6 +124,20 @@ function Invoke-GvmJitScan {
             do {
                 Start-Sleep -Seconds $PollSeconds
                 if ((Get-Date) -gt $deadline) {
+                    # Stop the task before giving up on it. Abandoning a RUNNING task and revoking
+                    # anyway means every remaining target sees the scanner authenticate as an account
+                    # that is now disabled -- generating in bulk the very 4776/0xC0000072 signal this
+                    # module tells you to alert on, from the scanner's own address. It also leaves the
+                    # task Running, so the next run's start_task is rejected and that run fails too.
+                    # Best-effort: if this cannot be delivered, the timeout is still the real error.
+                    try {
+                        $null = Invoke-GmpRequest @gmp -ExpectStatus @('200', '202') `
+                                    -Xml ('<stop_task task_id="{0}"/>' -f $TaskId)
+                        Write-JitLog "Scan exceeded MaxScanMinutes ($MaxScanMinutes); task $TaskId stopped" 1011 'Warning' $LogSource
+                    }
+                    catch {
+                        Write-JitLog ("Scan exceeded MaxScanMinutes ($MaxScanMinutes) and stop_task also failed: {0}" -f $_.Exception.Message) 1011 'Warning' $LogSource
+                    }
                     throw "Scan exceeded MaxScanMinutes ($MaxScanMinutes); revoking the credential rather than waiting longer."
                 }
                 $doc = Invoke-GmpRequest @gmp -Xml ('<get_tasks task_id="{0}"/>' -f $TaskId)
@@ -136,13 +151,34 @@ function Invoke-GvmJitScan {
             Write-JitLog "Scan reached terminal state: $status" 1020 'Information' $LogSource
         }
     }
+    catch {
+        # Captured, not handled: rethrown below, AFTER the finally has revoked, so the revoke result
+        # can be attached to it. See the throw for why that matters.
+        $scanError = $_
+    }
     finally {
         # Not inside a try/catch of its own: Revoke-GvmScanCredential does not throw by default, so
         # it cannot mask an exception already propagating from the scan.
         # $grant is null only when Grant itself failed, and Grant rolls back its own partial state.
-        if ($grant) { $result.Revoke = Revoke-GvmScanCredential -Grant $grant }
+        #
+        # -Confirm:$false because -Confirm on THIS function propagates into nested ShouldProcess
+        # calls: an operator running -Confirm interactively would be prompted again here, after the
+        # scan, and answering No (or Ctrl-C) would leave the account ENABLED with the password this
+        # process just wrote to AD. Cleanup must not be declinable.
+        if ($grant) { $result.Revoke = Revoke-GvmScanCredential -Grant $grant -Confirm:$false }
         $result.FinishedAt = Get-Date
         $result.Duration   = $result.FinishedAt - $result.StartedAt
+    }
+
+    if ($scanError) {
+        # A failed scan still throws, so a caller that ignores the return value cannot mistake it for
+        # success. But the revoke result was being lost with the exception, and that is the part that
+        # says whether the ACCOUNT is safe: a scan that timed out AND failed to revoke was
+        # indistinguishable from one that merely timed out -- both reached the scheduler as 1, which
+        # the entry points document as "not a security one". Attaching it lets them exit 2 instead.
+        # Measured on 5.1 and 7.x: Exception.Data survives `throw $ErrorRecord`.
+        $scanError.Exception.Data['GvmJitRevoke'] = $result.Revoke
+        throw $scanError
     }
 
     return $result

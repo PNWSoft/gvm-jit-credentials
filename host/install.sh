@@ -62,10 +62,14 @@ fi
 tmp="$(mktemp)"
 # env_reset is sudo's own default, but secure_path is a distro packaging choice, and this rule grants
 # root. State both explicitly so the fragment does not depend on what /etc/sudoers happens to contain.
+# The trailing "" on the Cmnd is not decoration: sudoers(5) treats a bare command path as "this
+# command with ANY arguments", while an empty double-quoted string after it means "with NO arguments".
+# The relay ignores $@ today, so this changes nothing now -- it stops a future version that reads an
+# argument from silently becoming caller-controlled.
 cat > "$tmp" <<SUDOERS
 Defaults:$SCAN_ACCOUNT !requiretty
 Defaults:$SCAN_ACCOUNT env_reset, secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
-$SCAN_ACCOUNT ALL=(root) NOPASSWD: $PREFIX/gmp-relay.sh
+$SCAN_ACCOUNT ALL=(root) NOPASSWD: $PREFIX/gmp-relay.sh ""
 SUDOERS
 
 # Validate BEFORE installing: a malformed sudoers file can lock out sudo entirely.

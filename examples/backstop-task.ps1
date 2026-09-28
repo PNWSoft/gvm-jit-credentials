@@ -13,11 +13,19 @@
   Exit codes, because "did it work" has to be answerable from the scheduler alone:
 
     0  account disabled, password invalidated, and the scanner's stored copy overwritten.
-    1  the AD revoke itself failed -- the account may still be usable with a known password. This is
-       the one that means NOT SAFE; -Strict throws, so the task reports failure.
-    3  the account is secured, but overwriting the scanner's stored copy failed (event 1010, Warning).
-       The AD reset has already invalidated that value, so nothing usable is left behind. What this
-       actually signals is a broken GMP path, worth knowing before the next grant needs it.
+    1  the AD revoke failed -- the account may still be usable with a known password. This is the one
+       that means NOT SAFE; -Strict throws, so the task reports failure. It is also what an exception
+       before the revoke produces (a missing Identity in the config, a failed Import-Module), which
+       leaves the account in whatever state it was already in -- still unrevoked, so still read it as
+       "look now".
+    3  the account is secured, but overwriting the scanner's stored copy was skipped or failed
+       (event 1010, Warning) -- the GMP settings are absent or malformed, or the scanner rejected the
+       write. The AD reset has already invalidated that value, so nothing usable is left behind. What
+       this signals is a broken GMP path, worth knowing before the next grant needs it.
+
+  There is deliberately no 2 here. scan-task.ps1 uses 2 for a failed revoke because its 1 already
+  means "the scan failed"; this script has no scan, so a failed revoke IS its 1. The two scripts share
+  0 and 3 only -- do not carry a single reading of "1" between them.
 
   A backstop that reports success when part of it failed is worse than no backstop, because you stop
   looking. But one that screams NOT SAFE over a hygiene failure trains you to ignore it, which ends
@@ -88,8 +96,13 @@ function Get-Cfg {
 # -Strict: here we DO want a throw, so the scheduled task reports failure.
 # Assigned rather than left on the pipeline: emitting the result object dumps a Format-List with
 # blank lines into the task log, burying the event lines that actually matter.
-$r = Revoke-GvmScanCredential -Identity (Get-Cfg 'Identity' -Required) -CredentialId (Get-Cfg 'CredentialId' -Required) `
-    -ScannerHost (Get-Cfg 'ScannerHost' -Required) -GmpHelper (Get-Cfg 'GmpHelper' -Required) -IdentityFile (Get-Cfg 'IdentityFile' '') `
+# Only Identity is -Required. The three GMP keys are NOT, deliberately: they are needed solely for
+# step 3, the best-effort overwrite of the copy Greenbone stores. Requiring them meant one missing or
+# malformed key threw here, in Get-Cfg, before the account was disabled -- so the backstop failed every
+# week while leaving the very thing it exists to revoke untouched. Missing keys now skip step 3 and
+# surface as a warning (exit 3), with the AD revoke already done.
+$r = Revoke-GvmScanCredential -Identity (Get-Cfg 'Identity' -Required) -CredentialId (Get-Cfg 'CredentialId' '') `
+    -ScannerHost (Get-Cfg 'ScannerHost' '') -GmpHelper (Get-Cfg 'GmpHelper' '') -IdentityFile (Get-Cfg 'IdentityFile' '') `
     -LogSource $LogSource -Strict
 
 "Backstop revoke for '$($r.Identity)' via $($r.Server)"

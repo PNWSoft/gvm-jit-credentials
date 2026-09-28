@@ -71,7 +71,8 @@ function Invoke-GmpRequest {
     # In PS 5.1 a native command writing to STDERR raises a terminating NativeCommandError when
     # $ErrorActionPreference is 'Stop'. ssh itself writes to stderr (host-key notices, banners,
     # keepalive failures), so localise to 'Continue'; success is judged solely by the parsed status
-    # below. The relay's own stderr is quiet -- it runs docker with --progress quiet and 2>/dev/null
+    # below. The relay's stderr carries only its own die() messages and a failing gvm-cli's reason;
+    # docker's chatter is what it discards (--progress quiet, and compose stderr sent to a file)
     # -- but ssh's is not, which is why this is still needed.
     $ErrorActionPreference = 'Continue'
     try {

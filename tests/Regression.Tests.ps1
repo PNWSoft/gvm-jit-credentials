@@ -36,7 +36,15 @@ Describe 'Revoke does not hand Greenbone a working password' {
 
         $script:adPassword | Should -Not -BeNullOrEmpty
         $script:gmpBody    | Should -Not -BeNullOrEmpty
-        $script:gmpBody    | Should -Not -Match ([regex]::Escape($script:adPassword))
+
+        # Compare the ESCAPED form, because that is what the body would contain. Comparing the raw AD
+        # value let this test pass against the very defect it pins: the generated alphabet includes
+        # '&', so whenever the password contained one, ConvertTo-GmpText turned it into '&amp;' in the
+        # body and the raw-value regex no longer matched -- roughly 40% of runs went green on a
+        # regression. Asserted on both forms so neither escaping nor its absence can hide a reuse.
+        $escaped = InModuleScope GvmJitCredential -Parameters @{ p = $script:adPassword } { ConvertTo-GmpText $p }
+        $script:gmpBody | Should -Not -Match ([regex]::Escape($escaped))
+        $script:gmpBody | Should -Not -Match ([regex]::Escape($script:adPassword))
     }
 
     It 'does not treat a failed Greenbone overwrite as an error, because the AD reset already invalidated it' {
@@ -132,6 +140,55 @@ Describe 'Invoke-GvmJitScan survives a failing Grant' {
         # inside means the finally runs -- and must cope with $grant being null.
         Mock -ModuleName GvmJitCredential Grant-GvmScanCredential { throw 'scanner unreachable' }
         { Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555' } | Should -Throw '*scanner unreachable*'
+    }
+
+    It 'carries the revoke result out on the exception when the SCAN fails' {
+        # The gap the child-process exit-code tests cannot reach, because their stub never throws.
+        # When the scan throws, the finally revokes and then the exception propagates -- and the result
+        # object, including Revoke.Errors, went with it. So "timed out" and "timed out AND the account
+        # is still enabled" both arrived at the scheduler as 1, documented as "not a security one".
+        Mock -ModuleName GvmJitCredential Grant-GvmScanCredential {
+            [pscustomobject]@{ Identity = 'scan-acct'; CredentialId = '11111111-2222-3333-4444-555555555555'
+                               ScannerHost = 'gvm-relay@scanner.example.local'; GmpHelper = '/opt/greenbone/gmp.sh' }
+        }
+        Mock -ModuleName GvmJitCredential Revoke-GvmScanCredential {
+            [pscustomobject]@{ Disabled = $false; PasswordReset = $false
+                               Errors = [string[]]@('DISABLE FAILED'); Warnings = [string[]]@() }
+        }
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'poll failed mid-scan' }
+
+        $caught = $null
+        try { Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555' }
+        catch { $caught = $_ }
+
+        $caught | Should -Not -BeNullOrEmpty
+        $revoke = $caught.Exception.Data['GvmJitRevoke']
+        $revoke | Should -Not -BeNullOrEmpty -Because 'the entry points need it to tell exit 2 from exit 1'
+        $revoke.Errors.Count | Should -Be 1
+        $revoke.Errors[0] | Should -Be 'DISABLE FAILED'
+    }
+
+    It 'stops the Greenbone task when MaxScanMinutes expires, instead of abandoning it running' {
+        # Revoking while the task keeps running makes every remaining target see the scanner
+        # authenticate as a now-disabled account, generating the module's own alerting signal in bulk
+        # from the scanner's address -- and leaves the task Running, so the next start_task is refused.
+        Mock -ModuleName GvmJitCredential Grant-GvmScanCredential {
+            [pscustomobject]@{ Identity = 'scan-acct'; CredentialId = '11111111-2222-3333-4444-555555555555'
+                               ScannerHost = 'gvm-relay@scanner.example.local'; GmpHelper = '/opt/greenbone/gmp.sh' }
+        }
+        $script:sent = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest {
+            $script:sent.Add($Xml)
+            if ($Xml -match 'get_tasks') { [xml]'<get_tasks_response status="200"><task><status>Running</status></task></get_tasks_response>' }
+            else { [xml]'<r status="200"/>' }
+        }
+
+        # MaxScanMinutes 0: the deadline is already past when the first poll checks it.
+        { Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555' -MaxScanMinutes 0 } |
+            Should -Throw '*exceeded MaxScanMinutes*'
+
+        ($script:sent | Where-Object { $_ -match '<stop_task task_id="99999999-8888-7777-6666-555555555555"/>' }).Count |
+            Should -Be 1 -Because 'the timed-out task must be stopped, not left running'
     }
 }
 
@@ -279,9 +336,48 @@ Describe 'Input validation at the boundary' {
             Should -Throw -ExceptionType ([System.Management.Automation.ParameterBindingException])
     }
 
-    It 'gives a clear message for a grant record whose CredentialId is not a UUID' {
-        { Revoke-GvmScanCredential -Grant ([pscustomobject]@{ Identity = 'a'; CredentialId = 'x' }) } |
-            Should -Throw '*not a UUID*'
+    It 'still revokes AD when the grant record has a malformed CredentialId, rather than refusing to start' {
+        # This used to throw, and Revoke's CredentialId parameter used to carry a ValidatePattern, so a
+        # bad id was rejected at BINDING -- before the account was disabled. That inverted the point of
+        # the function: the AD revoke is the security boundary, the Greenbone overwrite is hygiene.
+        # Concrete case it broke: config.psd1 filled in from a -WhatIf bootstrap run holds
+        # CredentialId = '<not created>', and the weekly backstop then failed without disabling anything.
+        Mock -ModuleName GvmJitCredential Resolve-JitDomainController { 'dc1.example.local' }
+        Mock -ModuleName GvmJitCredential Write-JitLog {}
+        $script:disabled = $false
+        $script:reset    = $false
+        Mock -ModuleName GvmJitCredential Set-JitAccountEnabled  { $script:disabled = -not $Enabled }
+        Mock -ModuleName GvmJitCredential Set-JitAccountPassword { $script:reset = $true }
+        Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'must not be called with a bad id' }
+
+        # Called directly, NOT inside a { } passed to Should -Not -Throw: assignment inside that
+        # scriptblock is local to it, so $r stayed $null and the assertions below silently examined
+        # nothing ($null.Count is 0, which is how this was caught). A throw here fails the test anyway,
+        # so the guarantee is the same and the result is actually usable.
+        $r = Revoke-GvmScanCredential -Grant ([pscustomobject]@{
+                    Identity = 'a'; CredentialId = '<not created>'
+                    ScannerHost = 'gvm-relay@scanner.example.local'; GmpHelper = '/opt/greenbone/gmp.sh' })
+
+        $script:disabled | Should -BeTrue -Because 'disabling the account is the whole job'
+        $script:reset    | Should -BeTrue -Because 'the password must be invalidated regardless'
+        $r.GreenboneBlanked | Should -BeFalse
+        $r.Errors.Count   | Should -Be 0 -Because 'a bad id is a hygiene problem, not a failed revoke'
+        $r.Warnings.Count | Should -Be 1
+        $r.Warnings[0] | Should -BeLike '*not a UUID*' -Because 'the reason must still be reported'
+    }
+
+    It 'warns rather than silently skipping when the Greenbone settings are incomplete' {
+        # The failure mode introduced by making those keys optional: step 3 simply fell through, so
+        # GreenboneBlanked stayed false with nothing in Warnings and the task reported a clean run.
+        Mock -ModuleName GvmJitCredential Resolve-JitDomainController { 'dc1.example.local' }
+        Mock -ModuleName GvmJitCredential Write-JitLog {}
+        Mock -ModuleName GvmJitCredential Set-JitAccountEnabled {}
+        Mock -ModuleName GvmJitCredential Set-JitAccountPassword {}
+
+        $r = Revoke-GvmScanCredential -Identity 'a' -CredentialId '11111111-2222-3333-4444-555555555555'
+        $r.GreenboneBlanked | Should -BeFalse
+        $r.Warnings.Count | Should -Be 1 -Because 'a skipped overwrite must be visible in the exit code'
+        $r.Warnings[0] | Should -BeLike '*ScannerHost*'
     }
 }
 
@@ -459,8 +555,10 @@ Describe 'Write-Error cannot be used as a report-then-exit in a Stop-preference 
 
         foreach ($we in $writeErrors) {
             $txt = $we.Extent.Text
-            # Terminating here would skip whatever exit follows, so the intent must be stated.
-            $txt | Should -Match '-ErrorAction' -Because `
+            # Must be a NON-terminating action specifically. Matching '-ErrorAction' alone accepted
+            # '-ErrorAction Stop', which is the bug rather than the fix -- the assertion would have
+            # passed on code that still skipped the exit following it.
+            $txt | Should -Match '-ErrorAction\s+(Continue|SilentlyContinue|Ignore)' -Because `
                 "Write-Error terminates under `$ErrorActionPreference='Stop', skipping the exit that follows it: $txt"
         }
     }
@@ -478,7 +576,15 @@ Describe 'Task registration examples survive powershell.exe -Command' {
     ) {
         $text = Get-Content (Join-Path (Split-Path $PSScriptRoot -Parent) "examples\$Name") -Raw
         $help = $text.Substring(0, $text.IndexOf('#>'))
-        $help | Should -Match 'exit \$LASTEXITCODE' -Because 'otherwise every documented exit code collapses to 0 or 1'
-        $help | Should -Match 'catch' -Because 'a missing or AllSigned-refused script otherwise reports success'
+
+        # Assert on the ARGUMENT STRING, not on the help text as a whole. `Should -Match 'catch'`
+        # matched the surrounding prose ("only the catch fixes the second"), so it passed even with the
+        # catch deleted from the example -- a test that could not fail for the reason it existed.
+        $action = [regex]::Match($help, '(?s)\$action\s*=\s*New-ScheduledTaskAction.*?\)\r?\n')
+        $action.Success | Should -BeTrue -Because 'the help must contain a copy-pasteable $action example'
+        # The backtick is expected: the example is PowerShell that BUILDS the argument string, so it
+        # escapes the $ as `$ to keep it literal. Matching a bare '$' failed on correct examples.
+        $action.Value | Should -Match 'exit `?\$LASTEXITCODE' -Because 'otherwise every documented exit code collapses to 0 or 1'
+        $action.Value | Should -Match 'catch\s*\{' -Because 'a missing or AllSigned-refused script otherwise reports success'
     }
 }

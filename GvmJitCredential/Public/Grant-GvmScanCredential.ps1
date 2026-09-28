@@ -102,9 +102,14 @@ function Grant-GvmScanCredential {
             # -Strict so a rollback that fails THROWS and lands in the catch below, producing the
             # 1903 event. Without it Revoke returns normally with its failures only in .Errors, and
             # the "rollback also failed" branch is effectively unreachable.
+            #
+            # -Confirm:$false because -Confirm on THIS function propagates into nested ShouldProcess
+            # calls. An operator running Grant -Confirm, answering Yes, then hitting a failed GMP push
+            # would be prompted a SECOND time here -- and declining it leaves the account ENABLED with
+            # the password just written to AD. A rollback must not be declinable.
             $null = Revoke-GvmScanCredential -Identity $Identity -CredentialId $CredentialId `
                 -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `
-                -Server $Server -LogSource $LogSource -Strict
+                -Server $Server -LogSource $LogSource -Strict -Confirm:$false
         }
         catch {
             # Rollback failing is the worst case: enabled account, nobody cleaning up. Say so loudly.

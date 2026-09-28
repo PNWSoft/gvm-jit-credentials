@@ -41,6 +41,21 @@
   deployment has no effect until the host set next changes. Delete the state file to force a new task
   if you need it applied immediately.
 
+.NOTES
+  Exit codes, the same meanings scan-task.ps1 uses:
+    0  scanned, and the credential fully revoked.
+    1  anything else -- the scan did not reach Done, or something threw. Check the log for event 1903
+       before reading it as scan-only: a grant whose rollback also failed lands here and can leave the
+       account ENABLED.
+    2  the revoke reported errors. The account may still be usable: investigate NOW.
+    3  scanned and revoked, but the scanner's stored copy was not overwritten (event 1010).
+
+  Registering this as a scheduled task: powershell.exe -Command does NOT propagate a script's exit
+  code, so wrap the call as scan-task.ps1's help shows -- "try { & 'script' ... *> 'log'; exit
+  $LASTEXITCODE } catch { ...; exit 1 }". Without it every code above arrives as 0 or 1, and the
+  "& { ... } *> log" form reports 0 even when this script is missing entirely. Note the wrapper in
+  that example passes -ConfigPath, which THIS script does not take: substitute the parameters below.
+
 .EXAMPLE
   .\weekly-ou-scan.ps1 -Identity gvm-scan -ScannerHost gvm-relay@scanner.example.local `
       -GmpHelper /opt/greenbone/gmp.sh -CredentialId ... -ConfigId ... -ScannerId ... `
@@ -226,6 +241,11 @@ $script:targetId = if ($script:reuseTargetId) { $script:reuseTargetId } else { '
 # reading it afterwards would throw if the block never reached the assignment.
 $script:scanStatus = ''
 
+# $result is assigned inside a try: a failing ScanAction throws out of Invoke-GvmJitScan, and the
+# revoke outcome then arrives on the exception rather than in a return value. Reading it is what
+# separates "the scan broke" from "the scan broke and the account is still enabled".
+$result = $null
+try {
 $result = Invoke-GvmJitScan -Identity $Identity -CredentialId $CredentialId `
     -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `
     -ReplicationDelaySeconds $ReplicationDelaySeconds -LogSource $LogSource `
@@ -256,9 +276,12 @@ $result = Invoke-GvmJitScan -Identity $Identity -CredentialId $CredentialId `
         $null = Invoke-GvmGmpRequest @gmp -Xml ('<start_task task_id="{0}"/>' -f $script:taskId) -ExpectStatus 200, 202
         Write-Host '  scan started; polling'
 
-        # Poll on the REPORT the start produced, not merely on task status: a fresh task has no
-        # previous report, so requiring last_report to exist AND status to be terminal avoids
-        # mistaking a stale state for this run's completion.
+        # Poll on task status. NOTE what this does NOT do: it does not require last_report to have
+        # changed. For a REUSED task that is already Done from last week, if gvmd has not yet moved the
+        # status to Requested by the time of the first poll, this loop exits immediately on that stale
+        # 'Done' and the run reports success against the PREVIOUS report. start_task sets Requested
+        # synchronously in practice, and the first poll is PollSeconds later, so the window is narrow --
+        # but it is a window, and comparing the report id against its pre-start value would close it.
         $deadline = (Get-Date).AddMinutes($MaxScanMinutes)
         $terminal = @('Done', 'Stopped', 'Interrupted')
         do {
@@ -277,6 +300,19 @@ $result = Invoke-GvmJitScan -Identity $Identity -CredentialId $CredentialId `
         $script:scanStatus = $status
         Write-Host "  scan reached terminal state: $status"
     }
+}
+catch {
+    $revoke = $_.Exception.Data['GvmJitRevoke']
+    Write-Warning "Scan failed: $($_.Exception.Message)"
+    if ($revoke -and $revoke.Errors.Count -gt 0) {
+        $revoke.Errors | ForEach-Object { Write-Error $_ -ErrorAction Continue }
+        exit 2      # the account may still be usable: outranks the scan failure
+    }
+    # Check the log for event 1903 before reading this as scan-only: a grant whose rollback ALSO
+    # failed reaches here too, and leaves the account enabled.
+    $_ | Out-String | Write-Host
+    exit 1
+}
 
 $reportNode = $null
 try {

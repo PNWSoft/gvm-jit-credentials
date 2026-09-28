@@ -17,7 +17,9 @@
 #   gvm-cli can take credentials as --gmp-password (argv, visible in `ps` to every local user, and
 #   container argv IS visible from the host) or from a config file. It can take the request as
 #   -X/--xml (argv again) or as a positional file. Both are therefore passed as FILES:
-#     * written into a mktemp dir under /dev/shm, which is tmpfs -- they never touch disk
+#     * written into a mktemp dir under /dev/shm, which is tmpfs -- so not written to the
+#       filesystem. "Off disk" is only true to the extent that swap is disabled or encrypted,
+#       since tmpfs pages can be swapped; see the README threat model.
 #     * left root-owned, mode 0444, inside a 0700 root-owned directory
 #     * mounted read-only, and the whole directory removed on exit via trap
 #
@@ -62,6 +64,15 @@ case "$perms" in
     *) die "$GMP_ENV has mode $perms; expected 600. Run: chmod 600 $GMP_ENV" ;;
 esac
 
+# OWNER check as well as mode, because the next line EXECUTES this file as root. A mode check alone
+# proves only that nobody else can read it; it says nothing about who wrote it, so any 0600 file the
+# caller happens to own would satisfy the test and then run with full privilege. Unreachable as
+# installed -- the sudoers fragment sets env_reset and the SSH forced command passes no environment,
+# so GMP_ENV cannot be steered from outside -- but present for the same reason PATH is hardcoded
+# below: this script should not depend on the invoking sudoers being exactly what install.sh wrote.
+owner="$(stat -c '%u' "$GMP_ENV")" || die "cannot stat $GMP_ENV"
+[ "$owner" -eq 0 ] || die "$GMP_ENV is owned by uid $owner, not root; refusing to source it as root"
+
 # shellcheck disable=SC1090
 . "$GMP_ENV"
 
@@ -91,19 +102,31 @@ chmod 444 "$d/req.xml" "$d/gvm-tools.conf"
 
 cd "$COMPOSE_DIR"
 
-# --progress quiet plus 2>/dev/null keeps STDOUT strictly the GMP response: compose otherwise emits
-# "No services to build" and pull progress, which would corrupt the XML the caller parses.
+# --progress quiet keeps STDOUT strictly the GMP response: compose otherwise emits "No services to
+# build" and pull progress, which would corrupt the XML the caller parses.
 # --no-deps avoids starting dependent services just to run a CLI.
+#
+# stderr goes to a FILE, not /dev/null. Discarding it meant a wrong GMP username or password in
+# .gmp.env reached the Windows side as "no response from the GMP helper, ssh exit 1, nothing on
+# stderr" -- which points at SSH or the sudo rule, the two things that were working, and says nothing
+# about the credentials that were not. Never onto stdout, which must stay pure XML.
 set +e
 timeout "$GMP_TIMEOUT" docker compose --progress quiet run --rm --no-deps -T \
     -v "$d/req.xml":/tmp/req.xml:ro \
     -v "$d/gvm-tools.conf":/tmp/gvm-tools.conf:ro \
     "$GVM_TOOLS_SERVICE" \
-    gvm-cli -c /tmp/gvm-tools.conf socket /tmp/req.xml 2>/dev/null
+    gvm-cli -c /tmp/gvm-tools.conf socket /tmp/req.xml 2>"$d/err"
 rc=$?
 set -e
 
 if [ "$rc" -eq 124 ]; then
     die "GMP request timed out after ${GMP_TIMEOUT}s (set GMP_TIMEOUT to change)"
+fi
+
+# On failure, pass the reason up. Bounded, because it is container output and the caller is remote;
+# compose noise lands here too, so the tail is the part that names the actual failure.
+if [ "$rc" -ne 0 ] && [ -s "$d/err" ]; then
+    printf 'gmp-relay.sh: gvm-cli exit %s: ' "$rc" >&2
+    tail -c 2048 "$d/err" >&2
 fi
 exit "$rc"

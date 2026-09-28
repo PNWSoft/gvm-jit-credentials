@@ -68,6 +68,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Normalise BEFORE $Path is used as a string prefix. The filter below slices FullName with
+# Substring($Path.Length), which mis-slices when $Path is relative ('.') or carries a trailing
+# separator: the computed first segment is then wrong, so the tests/.git exclusions quietly stop
+# applying -- test files get signed -- or the slice throws outright.
+$Path = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\', '/')
+
 # --- collect
 $files = @(
     Get-ChildItem -Path $Path -Recurse -Include *.ps1, *.psm1, *.psd1 -File |

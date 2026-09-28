@@ -7,8 +7,8 @@ Just-in-time credentials for authenticated Greenbone / OpenVAS scans.
 The scan account is **disabled**, with a password nobody holds, except during a scan. For the scan
 window it is enabled and its password rotated to a fresh random value; afterwards both are undone.
 The goal is narrow and worth stating plainly: to make that account **useless outside the scan
-window**, so that stealing the credential gains an attacker nothing until the next scan — and so that
-any attempt to use it in the meantime is unambiguous.
+window**, so that a stolen credential authenticates nowhere — then or later, because the next window
+uses a fresh value, not this one — and so that any attempt to use it is unambiguous.
 
 ```powershell
 $grant = Grant-GvmScanCredential -Identity gvm-scan -CredentialId $cfg.CredentialId `
@@ -48,8 +48,9 @@ running.
 
 - **The account is disabled between scans, and its password is one nobody holds.** Two independent
   layers, either of which alone would be enough. An attacker who extracts the credential from the
-  scanner's database, from a backup, or from the wire gets something that authenticates nowhere until
-  the next scan window opens. (Getting this wrong is easy: reusing the value written to AD during
+  scanner's database, from a backup, or from the wire gets something that authenticates nowhere, and
+  waiting for the next window does not help them: that window rotates the password again, so the value
+  they hold is never valid again. (Getting this wrong is easy: reusing the value written to AD during
   revoke would leave the scanner holding the account's *current* password, collapsing the two layers
   into one. `tests/Regression.Tests.ps1` pins it.)
 - **The signal for detection becomes unambiguous.** A disabled account
@@ -64,7 +65,10 @@ running.
 - Defence in depth rather than a primary control: with `-ExecutionPolicy AllSigned` in the task
   action, a tampered *script* fails to run instead of running as the runner. It does not help against
   a tampered *task* — an attacker who can edit the action simply removes the flag — and both need
-  write access that the deployment notes already say must be admin-only. Separately, and independent
+  write access that the deployment notes already say must be admin-only. One caveat worth checking on
+  your own host: if execution policy is set by **Group Policy**, the `MachinePolicy`/`UserPolicy` scope
+  overrides the command-line flag and the flag does nothing. `Get-ExecutionPolicy -List` shows which
+  scope is in force; if it is a policy scope, `AllSigned` has to be set there instead. Separately, and independent
   of signing: `config.psd1` and the state file are unsigned data, so parameters that reach a command
   line (`ScannerHost`, `GmpHelper`) and every Greenbone UUID are pattern-validated, and a reused task
   is verified against the current run before it is started.
@@ -134,7 +138,11 @@ running.
    pass `-ScanAction { ... }` instead of `-TaskId`, and your script block runs inside the same
    guarantees with `Invoke-GvmGmpRequest` available for its own GMP calls. Use the `Grant`/`Revoke`
    primitives directly only when you already have orchestration that owns the lifecycle.
-   `-MaxScanMinutes` bounds the poll loop so a hung scan cannot hold the credential open.
+   `-MaxScanMinutes` and `-PollSeconds` bound the **`-TaskId`** poll loop, so a hung scan cannot hold
+   the credential open. They do **not** apply to `-ScanAction`: that block is simply invoked, so it
+   must enforce its own deadline — `examples/weekly-ou-scan.ps1` shows one. A timed-out `-TaskId` scan
+   is also sent `stop_task` before the credential is revoked, so it does not keep running against
+   targets with a credential that no longer works.
 4. **Revoke** — always, in a `finally` block: disable the account, reset the password to a value
    nobody records, overwrite the stored Greenbone value.
 
@@ -236,14 +244,29 @@ claim support for a configuration you haven't run.
 #    forced command through the account's login shell, and /usr/sbin/nologin ignores -c and
 #    exits 1 with "This account is currently not available." The forced command plus no-pty
 #    below is what denies an interactive session, not the shell.
-#      SCAN_ACCOUNT=gvm-relay ./host/install.sh
-#      edit /opt/greenbone/.gmp.env  (chmod 600) — a DEDICATED low-privilege GMP user,
+#      RELAY_ACCOUNT=gvm-relay ./host/install.sh
+#      edit /opt/greenbone/.gmp.env  (chmod 600, root-owned) — a DEDICATED low-privilege GMP user,
 #      which you create in Greenbone yourself; the bootstrap makes a credential, not a user.
+#      Quote the password in that file: it is SOURCED by /bin/sh as root, not parsed as config.
 #    Then pin the runner's key in ~gvm-relay/.ssh/authorized_keys so a stolen key cannot get a shell:
 #      command="/opt/greenbone/gmp.sh",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 ...
+#
+#    Step 3 below has to reach the relay as well, and you cannot use the runner's key for it -- that
+#    key lives inside the gMSA's profile and granting yourself access to it breaks the runner's own
+#    ssh (see "Gotchas"). Do NOT add a second key to ~gvm-relay/.ssh/authorized_keys either: that
+#    account's whole security property is that it holds exactly ONE key pinned to ONE command, and a
+#    second, longer-lived key trades a permanent runtime weakness for a one-off setup convenience.
+#    Instead give YOURSELF the same scoped sudo rule for the duration of setup, and remove it after:
+#      printf '%s\n' 'you ALL=(root) NOPASSWD: /opt/greenbone/gmp-relay.sh ""' \
+#        > /etc/sudoers.d/99-you-setup-temp && visudo -c
+#    ...then pass -ScannerHost you@scanner in step 3, and when setup is done:
+#      rm /etc/sudoers.d/99-you-setup-temp && visudo -c
+#    Removing it is the last step of installation, not an optional tidy-up.
 
-# 3. Greenbone side: create the credential object and discover the UUIDs you need
-.\bootstrap\Initialize-GvmScanCredential.ps1 -ScannerHost gvm-relay@scanner.example.local `
+# 3. Greenbone side: create the credential object and discover the UUIDs you need.
+#    This makes GMP calls only — no Active Directory, nothing Windows-specific — so it needs the
+#    temporary access from step 2 and nothing more. Run it once.
+.\bootstrap\Initialize-GvmScanCredential.ps1 -ScannerHost you@scanner.example.local `
     -GmpHelper /opt/greenbone/gmp.sh -ScanAccount 'EXAMPLE\gvm-scan' -OutFile .\config.psd1
 
 # 4. Decide how the account gets access on targets — your call.
@@ -304,12 +327,14 @@ exactly this reason.
 ## Testing
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser
+Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser
 Invoke-Pester -Path ./tests
 ```
 
 The suite needs **no Active Directory and no scanner**. Every external dependency goes through a
-private seam that the tests mock, which is why it runs in CI. If you add a code path that talks to
+private seam that the tests mock, which is why it runs in CI. It does need **Windows**: the exit-code
+contract tests spawn `powershell.exe` to run the entry-point scripts as child processes, so those cases
+fail under `pwsh` on Linux or macOS. CI runs on `windows-latest` for that reason. If you add a code path that talks to
 AD or GMP directly instead of through those seams, it becomes untestable — please don't.
 
 ## Status
@@ -321,11 +346,19 @@ under load, and the backstop's failure path including a deliberately failing rev
 suite needs neither.
 
 The three scheduled-task entry points were re-verified as a signed deployment, run by the runner gMSA
-under `-ExecutionPolicy AllSigned`, with every documented exit code observed rather than inferred: a
-clean revoke (0), a revoke whose scanner-side overwrite failed while the AD side succeeded (3), a
-revoke against a nonexistent account (1), the fast scan path (0), and `weekly-ou-scan.ps1` building a
-target and task and then reusing both on a second run (0). Authentication was confirmed from the scan
-report itself — `login/SMB/success: TRUE` — rather than from the scan merely finishing.
+under `-ExecutionPolicy AllSigned`. What was observed live, as distinct from what is covered by tests:
+
+- **`backstop-task.ps1` — every documented code observed**: a clean revoke (0), a revoke whose
+  scanner-side overwrite failed while the AD side succeeded (3), and a revoke against a nonexistent
+  account (1).
+- **`scan-task.ps1` — the success path observed** (0), both fast and with an authenticated scan.
+  Its 1, 2 and 3 are exercised in the test suite against a stub module, not live.
+- **`weekly-ou-scan.ps1` — the success path observed** (0), building a target and task and then
+  reusing both on a second run. Its non-zero codes share `scan-task.ps1`'s logic and are inferred
+  from it; they have no test of their own.
+
+Authentication was confirmed from the scan report itself — `login/SMB/success: TRUE` — rather than from
+the scan merely finishing.
 
 Three defects were reachable only that way, and are worth knowing about if you adapt this: a partial
 revoke that reported success, an exit code made unreachable by `Write-Error` under

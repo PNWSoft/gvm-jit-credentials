@@ -60,7 +60,12 @@ function Revoke-GvmScanCredential {
         [Parameter(Mandatory, ParameterSetName = 'ByIdentity')]
         [string]$Identity,
 
-        [Parameter(ParameterSetName = 'ByIdentity')][ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$CredentialId = '',
+        # Deliberately NOT ValidatePattern. This function exists to make the account unusable, and a
+        # binding-time rejection fires BEFORE step 1 -- so a malformed id meant the AD revoke never ran
+        # at all. Concretely: a config.psd1 filled in from a -WhatIf bootstrap run carries
+        # CredentialId = '<not created>', and the backstop then failed every week without disabling
+        # anything. A bad id now degrades step 3 to a warning; step 3 does the checking.
+        [Parameter(ParameterSetName = 'ByIdentity')][string]$CredentialId = '',
         [Parameter(ParameterSetName = 'ByIdentity')][string]$ScannerHost  = '',
         [Parameter(ParameterSetName = 'ByIdentity')][string]$GmpHelper    = '',
         [Parameter(ParameterSetName = 'ByIdentity')][string]$IdentityFile = '',
@@ -83,9 +88,9 @@ function Revoke-GvmScanCredential {
         if (-not $gIdentity) {
             throw 'The supplied -Grant object has no Identity. Pass -Identity explicitly instead.'
         }
-        if ($gCred -and $gCred -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
-            throw "The supplied -Grant object has a CredentialId that is not a UUID: '$gCred'"
-        }
+        # No longer a throw, for the same reason the ValidatePattern was removed: refusing to start
+        # leaves the account enabled. A malformed id is carried through and rejected by step 3, which
+        # records it as a warning after the AD revoke has already happened.
         $Identity     = $gIdentity
         $CredentialId = $gCred
         $ScannerHost  = [string](Get-ObjectProperty $Grant 'ScannerHost' '')
@@ -148,7 +153,35 @@ function Revoke-GvmScanCredential {
     }
 
     # --- 3) best-effort: overwrite the value Greenbone stores as well
-    if ($BlankGreenboneCredential -and $CredentialId -and $ScannerHost -and $GmpHelper) {
+    #
+    # The UUID check lives HERE, after the two AD steps, rather than on the parameter. Rejecting a
+    # malformed id at binding time stopped the whole function before it disabled anything, which is
+    # the opposite of what a revoke should do when its input is wrong.
+    # Every branch that SKIPS step 3 records a warning, except the caller explicitly opting out. An
+    # earlier shape simply fell through when the GMP settings were incomplete, so GreenboneBlanked
+    # stayed false with nothing in Warnings -- a silent skip that the scheduled task reported as a
+    # clean run.
+    if (-not $BlankGreenboneCredential) {
+        # The caller asked not to. Nothing to report.
+    }
+    elseif (-not ($CredentialId -and $ScannerHost -and $GmpHelper)) {
+        $missing = @(
+            if (-not $CredentialId) { 'CredentialId' }
+            if (-not $ScannerHost)  { 'ScannerHost' }
+            if (-not $GmpHelper)    { 'GmpHelper' }
+        ) -join ', '
+        $msg = "Skipped overwriting the Greenbone-stored value: $missing not supplied. The AD reset " +
+               'above has already invalidated that value, so nothing usable is left behind.'
+        $result.Warnings.Add($msg)
+        Write-JitLog $msg 1010 'Warning' $LogSource
+    }
+    elseif ($CredentialId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+        $msg = "Skipped overwriting the Greenbone-stored value: CredentialId '$CredentialId' is not a " +
+               'UUID. The AD reset above has already invalidated that value, so nothing usable is left behind.'
+        $result.Warnings.Add($msg)
+        Write-JitLog $msg 1010 'Warning' $LogSource
+    }
+    else {
         try {
             # MUST be an independent value, never $garbage. Pushing the same value would leave
             # Greenbone holding the account's CURRENT VALID password, so the only thing preventing
