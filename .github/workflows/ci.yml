@@ -54,8 +54,14 @@ jobs:
 
       - name: Pester
         run: |
-          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
-          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          # Pinned below 6. Pester 6 requires PowerShell 7, so on the Windows PowerShell 5.1 leg
+          # `-MinimumVersion 5.5.0` alone can resolve a version that cannot load at all -- verified
+          # locally: installing it that way under 5.1 gave Pester 6.2.0, and Import-Module then failed
+          # with "the module could not be loaded". This run only passed because the hosted image happens
+          # to ship a 5.x as well, which is not something to depend on.
+          Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force
+          Write-Host "Pester $((Get-Module Pester).Version) on PowerShell $($PSVersionTable.PSVersion)"
           $c = New-PesterConfiguration
           $c.Run.Path = './tests'
           $c.Run.Exit = $true

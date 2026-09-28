@@ -213,10 +213,17 @@ function Update-GptIniVersion {
         tab before the key, and skipping those sends this down the append branch, leaving a SECOND
         Version= line whose stale predecessor is the one GetPrivateProfileInt returns.
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][int]$Version
     )
+    # SupportsShouldProcess because this writes to SYSVOL and the verb says so. The caller has already
+    # passed its own ShouldProcess gate and returns before reaching here under -WhatIf, so this is a
+    # second belt rather than a prompt anyone will meet -- but a function that edits shared domain
+    # state should not be the one place in the script that cannot be dry-run.
+    if (-not $PSCmdlet.ShouldProcess($Path, "Set Version=$Version")) { return }
+
     $iniBytes = [IO.File]::ReadAllBytes($Path)
     # Length guards are load-bearing: under StrictMode indexing [1] of a 1-byte array throws, and -and
     # short-circuits before it.

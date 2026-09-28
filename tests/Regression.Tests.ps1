@@ -479,8 +479,21 @@ Export-ModuleMember -Function Revoke-GvmScanCredential, Invoke-GvmJitScan
             param([string]$Script, [string]$ModulePath)
             # Bypass: the working-tree copies are unsigned source. The signed artifact is verified
             # separately by examples\Sign-Module.ps1 re-parsing every file after signing.
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-                (Join-Path $script:examples $Script) -ConfigPath $script:cfg -ModulePath $ModulePath *> $null
+            #
+            # EAP localised to Continue, and this is not cosmetic. In Windows PowerShell 5.1 a child
+            # process that writes to stderr raises a NativeCommandError, which under an enclosing
+            # 'Stop' preference terminates the caller -- and '*> $null' does not prevent it, because the
+            # error record is raised rather than written to a stream. Every test here drives a FAILURE
+            # path on purpose, so the child always writes to stderr. pwsh 7 does not behave this way,
+            # which is exactly why this passed locally under 7 and failed on the 5.1 leg in CI. The
+            # whole point of these tests is the exit code, so the exit code is what must survive.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+                    (Join-Path $script:examples $Script) -ConfigPath $script:cfg -ModulePath $ModulePath *> $null
+            }
+            finally { $ErrorActionPreference = $prevEap }
             $LASTEXITCODE
         }
     }
