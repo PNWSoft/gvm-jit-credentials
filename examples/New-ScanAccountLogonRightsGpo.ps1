@@ -195,7 +195,13 @@ function Get-ReportUserRight {
     #>
     param([Parameter(Mandatory)][xml]$Report)
 
-    foreach ($u in $Report.SelectNodes("//*[local-name()='UserRightsAssignment']")) {
+    # Scoped to the COMPUTER side. User Rights Assignment is a computer-policy setting, so a bare '//'
+    # cannot pick up anything legitimate from the user side -- but if it ever did, the result would be a
+    # false conflict report or a verification pass on a right that is not actually being applied to
+    # machines, which is the silent-wrong-answer class this helper exists to avoid.
+    $xpath = "/*[local-name()='GPO']/*[local-name()='Computer']" +
+             "//*[local-name()='UserRightsAssignment']"
+    foreach ($u in $Report.SelectNodes($xpath)) {
         $nameNode = $u.SelectSingleNode("*[local-name()='Name']")
         if (-not $nameNode) { continue }
         [pscustomobject]@{
@@ -240,10 +246,18 @@ if ($samName -like '*@*') { throw "-Identity '$Identity' looks like a UPN. Use D
 # Single-quoted -Filter: the AD filter parser expands $samName itself. Interpolating it into a
 # double-quoted string breaks on an apostrophe, which is legal in a sAMAccountName (o'scan).
 $adObj = Get-ADObject -Filter 'sAMAccountName -eq $samName' -Server $pdc `
-            -Properties objectSid, objectClass -ErrorAction SilentlyContinue | Select-Object -First 1
+            -Properties objectSid, objectClass, sAMAccountName -ErrorAction SilentlyContinue |
+            Select-Object -First 1
 if (-not $adObj) {
     throw ("No object with sAMAccountName '$samName' on $pdc. Pass -Identity as " +
            'DOMAIN' + [char]92 + 'name for an account in this domain.')
+}
+# The AD filter treats '*' in an -eq value as an LDAP substring match, so '-Identity DOM\gvm*' would
+# resolve to whatever matched first and be restricted silently. '*' is not legal in a sAMAccountName, so
+# an exact comparison here can only ever reject a wildcard someone typed.
+if ($adObj.sAMAccountName -ne $samName) {
+    throw ("-Identity '$Identity' matched '$($adObj.sAMAccountName)' rather than an account named " +
+           "exactly '$samName'. Wildcards are not accepted -- name the account exactly.")
 }
 $sid = $adObj.objectSid.Value
 Write-Host "$Identity resolves to $sid (class '$($adObj.objectClass)', from $pdc)"
@@ -347,11 +361,24 @@ if ($changed.Count -gt 0 -or $cse.Added -or $iniVer -ne $curVer) {
     # Only the Version key is rewritten. Replacing the file wholesale would drop displayName=, which
     # New-GPO writes -- harmless to clients, since MS-GPOL requires only Version, but there is no reason
     # to discard a key this script does not own.
+    #
+    # Done over BYTES via codepage 28591 (ISO-8859-1), whose 256 code points map one-to-one onto the 256
+    # byte values, so decode-then-encode returns the original bytes whatever the file's real encoding is.
+    # This matters because GPMC writes GPT.INI as ANSI: reading it as text and rewriting it as ASCII turns
+    # a non-ASCII displayName into question marks, which would corrupt the very key this is preserving.
+    # Only the Version token itself is touched, and 'Version' and its digits are the same bytes in every
+    # encoding this file is ever in.
+    #
+    # [^\r\n]* rather than .*$ -- in .NET '.' matches \r and multiline '$' sits before \n, so '.*$' eats
+    # the CR and leaves a lone LF behind on a CRLF file.
     if (Test-Path -LiteralPath $iniPath) {
-        $ini = Get-Content -LiteralPath $iniPath -Raw
-        $ini = if ($ini -match '(?im)^\s*Version\s*=') { $ini -replace '(?im)^\s*Version\s*=.*$', "Version=$newVer" }
-               else { $ini.TrimEnd() + "`r`nVersion=$newVer" }
-        Set-Content -LiteralPath $iniPath -Value $ini.TrimEnd() -Encoding Ascii
+        $byteSafe = [Text.Encoding]::GetEncoding(28591)
+        $ini = $byteSafe.GetString([IO.File]::ReadAllBytes($iniPath))
+        $ini = if ($ini -match '(?im)^\s*Version\s*=') {
+                   $ini -replace '(?im)^\s*Version\s*=[^\r\n]*', "Version=$newVer"
+               }
+               else { $ini.TrimEnd() + "`r`nVersion=$newVer`r`n" }
+        [IO.File]::WriteAllBytes($iniPath, $byteSafe.GetBytes($ini))
     }
     else { Set-Content -LiteralPath $iniPath -Value @('[General]', "Version=$newVer") -Encoding Ascii }
     Write-Host "  version $curVer -> $newVer (computer $($curVer -band 0xFFFF) -> $compPart); GPT.INI and AD agree"

@@ -97,16 +97,51 @@ if (-not $Force) {
     }
 
     # The prefix test above does NOT mean "a domain account". A LOCAL account has an S-1-5-21-<machine>
-    # SID too, so '.\Administrator' or 'THISHOST\Administrator' sails through it -- measured, not
-    # assumed. Denying interactive and RDP logon to this machine's own Administrator is the single worst
-    # outcome this script can produce, so compare against the machine's own account domain.
-    $localDomainSid = (New-Object Security.Principal.NTAccount(
-                          "$env:COMPUTERNAME\Administrator")).Translate(
-                          [Security.Principal.SecurityIdentifier]).AccountDomainSid.Value
-    if ($sidObj.AccountDomainSid.Value -eq $localDomainSid) {
+    # SID too, so 'THISHOST\Administrator' sails through it -- measured, not assumed. Denying interactive
+    # and RDP logon to this machine's own Administrator is the worst outcome this script can produce, so
+    # compare against the machine's own account domain.
+    #
+    # The machine SID is read from whichever local account comes back first, and NOT by translating the
+    # name 'Administrator': that account is renamed on any CIS- or STIG-hardened host, and naming it made
+    # this guard throw IdentityNotMappedException and abort the whole script -- on precisely the machines
+    # most likely to run it. A guard whose failure mode is "operator reaches for -Force" is worse than no
+    # guard, because -Force switches off the object-class and RID checks too. So this degrades to a
+    # warning when it cannot answer, and never blocks on its own failure.
+    #
+    # Skipped outright on a domain controller, where there is no separate local account database: the
+    # comparison would equal the DOMAIN SID and refuse every legitimate domain account.
+    $localDomainSid = $null
+    $isDc = $false
+    try { $isDc = ((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).DomainRole -ge 4) }
+    catch {
+        # Not fatal: $isDc stays false, and the local-account check below either answers or warns. It is
+        # reported at Verbose rather than as a warning because a member server -- the normal case -- is
+        # what the default already assumes.
+        Write-Verbose "could not read DomainRole, assuming this is not a domain controller: $($_.Exception.Message)"
+    }
+    if (-not $isDc) {
+        try {
+            $anyLocal = Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True' -ErrorAction Stop |
+                        Select-Object -First 1
+            if ($anyLocal) {
+                $localDomainSid = ([Security.Principal.SecurityIdentifier]$anyLocal.SID).AccountDomainSid.Value
+            }
+        }
+        catch { Write-Warning "  could not read this machine's SID: $($_.Exception.Message)" }
+    }
+    if ($isDc) {
+        Write-Warning '  this host is a domain controller; skipping the local-account check'
+    }
+    elseif (-not $localDomainSid) {
+        Write-Warning '  could not determine this machine''s SID; skipping the local-account check'
+    }
+    elseif ($sidObj.AccountDomainSid.Value -eq $localDomainSid) {
         throw ("$Identity is a LOCAL account on this machine ($sid), not a domain account. Denying it " +
                'these rights can lock this host out of its own administration. Refusing (-Force overrides).')
     }
+
+    # RID 500 is the built-in Administrator, local or domain. Anchored on the hyphen so it cannot match
+    # -1500 or -5000.
     if ($sid -match '-500$') {
         throw "$Identity is a built-in Administrator account (RID 500). Refusing (-Force overrides)."
     }
