@@ -100,10 +100,11 @@ function Invoke-GmpRequest {
         # redundant -- this catches the same thing -- and it needed a greedy .*, which backtracks
         # quadratically on stderr full of unclosed openers. [^<>]* cannot cross a tag, so it is linear.
         #
-        # Stops at '<' OR '>' deliberately. Reaching back past '>' would swallow the opening tag of an
-        # element this rule has already redacted, and in a real truncation -- where the enclosing tag is
-        # cut away too -- it would reach into the relay's own prefix and destroy the one thing that must
-        # survive: which layer failed, and with what status.
+        # Stops at a tag boundary ('<' or '>') deliberately: reaching back past '>' would swallow the
+        # opening tag of an element this rule has already redacted, making the result neither readable
+        # nor idempotent. Note it does NOT preserve the relay's own prefix in the orphan case -- that
+        # text contains no '<' or '>' -- but the caller's own "ssh exit N:" wrapper still names the
+        # failing layer, so the diagnosis survives.
         #
         # KNOWN RESIDUAL: an orphan whose exposed fragment itself contains '>' keeps the part before that
         # '>'. Values this module sends cannot contain '<' or '>' at all -- the generated alphabet has
@@ -112,8 +113,8 @@ function Invoke-GmpRequest {
         # wider rule costs the failure signal above.
         $stderr = [regex]::Replace($stderr.Trim(), '(?is)[^<>]*</password>', '[redacted]</password>')
 
-        # An UNTERMINATED element -- no close at all, or a malformed one like </passwor> -- matches
-        # neither rule above, so it is handled by position rather than by pattern: anything that opens a
+        # An UNTERMINATED element -- no close at all, or a malformed one like </passwor> -- has no
+        # </password> for the rule above to anchor on, so it is handled by position rather than by pattern: anything that opens a
         # password element after the last real close is redacted through to the end of the string. Done
         # with IndexOf, not a lookahead regex, because the obvious `(?:(?!</password>).)*` form is
         # itself backtracking-prone on exactly the input this is meant to survive. Costs the trailing
@@ -121,7 +122,14 @@ function Invoke-GmpRequest {
         # line loses detail, under-redacting it loses a password.
         $ci = [StringComparison]::OrdinalIgnoreCase
         $lastClose = $stderr.LastIndexOf('</password>', $ci)
-        $openAfter = $stderr.IndexOf('<password', [Math]::Max(0, $lastClose + 11), $ci)
+        # Two things this arithmetic has to get right, and an earlier version got both wrong:
+        #   * With no close tag at all LastIndexOf returns -1, and Max(0, -1 + 11) is 10, not 0 -- so
+        #     the search started at 10 and skipped any '<password' in the first ten characters.
+        #   * IndexOf THROWS when startIndex exceeds the length, so any stderr trimming to under ten
+        #     characters with no close tag (a short sshd banner, a lone blank line, 'Killed') threw
+        #     here -- before the response was even looked at, failing calls that had SUCCEEDED.
+        $start = if ($lastClose -lt 0) { 0 } else { $lastClose + 11 }   # 11 = '</password>'.Length
+        $openAfter = $stderr.IndexOf('<password', [Math]::Min($start, $stderr.Length), $ci)
         if ($openAfter -ge 0) {
             $stderr = $stderr.Substring(0, $openAfter) + '<password>[redacted: unterminated]'
         }

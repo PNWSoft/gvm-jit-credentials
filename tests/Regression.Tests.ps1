@@ -604,10 +604,9 @@ Describe 'Relayed stderr cannot carry a password into the exception message' {
     #   orphaned close     -- what the relay's own `tail -c 1024` leaves when it cuts off the opening
     #                         tag, since tail keeps the END of the stream
     #   unterminated tag   -- the opposite cut, or simply malformed XML from such a caller
-    # The redaction is deliberately broader than these (attribute-tolerant, case-insensitive, greedy)
-    # because widening costs nothing at runtime. That extra tolerance is intentionally NOT pinned: it
-    # could only matter for XML no part of this project generates, and a '<' or '>' inside a value needs
-    # no special rule at all, since '.' matches both under (?s).
+    # These three are what is pinned. Shapes needing '<', '>', an attribute on <password>, or an
+    # uppercase tag are deliberately NOT pinned: GMP defines none of them and this project cannot emit
+    # them, so defending a caller's own hand-built request is out of scope.
     It 'redacts <Shape> arriving on stderr' -ForEach @(
         @{ Shape = 'a plain element';          Body = '<password>CANARY-A</password>' }
         @{ Shape = 'an orphaned close after truncation'; Body = 'CANARY-H</password>' }
@@ -634,7 +633,34 @@ Describe 'Relayed stderr cannot carry a password into the exception message' {
             $err.Exception.Message | Should -Not -Match 'CANARY' -Because 'no part of a password may reach the exception message, which is logged'
             $err.Exception.Message | Should -Match 'redacted'
         }
-        Remove-Item Env:\GVMJIT_TEST_STDERR_BODY -ErrorAction SilentlyContinue
+    }
+
+    # In the It body this was skipped whenever an assertion failed, leaving the variable set for the
+    # rest of an interactive session.
+    AfterEach { Remove-Item Env:\GVMJIT_TEST_STDERR_BODY -ErrorAction SilentlyContinue }
+
+    It 'does not fail a SUCCESSFUL call because stderr is short' -ForEach @(
+        @{ What = 'a lone blank line'; Text = "`n" }
+        @{ What = 'a short banner';    Text = 'Welcome' }
+        @{ What = 'a two-char line';   Text = 'ok' }
+    ) {
+        # The redaction runs before the response is examined, so an exception there fails a call that
+        # actually worked. The positional rule's start index used to be 10 even with no close tag, and
+        # IndexOf throws when startIndex exceeds the length -- so any stderr trimming to under ten
+        # characters threw here and a 200 response was lost.
+        $env:GVMJIT_TEST_STDERR_BODY = $Text
+        InModuleScope GvmJitCredential {
+            Mock Write-JitLog {}
+            Mock Test-Path { $true }
+            Mock Remove-Item {}
+            Mock Get-Content { $env:GVMJIT_TEST_STDERR_BODY }
+            # ssh is invoked directly, so it is the seam: mock it to produce a SUCCESSFUL response while
+            # the mocked Get-Content supplies the short stderr.
+            Mock ssh { '<get_version_response status="200"><version>22.7</version></get_version_response>' }
+            $doc = Invoke-GmpRequest -Xml '<get_version/>' -ScannerHost 'relay@scanner.invalid' `
+                        -GmpHelper '/opt/greenbone/gmp.sh'
+            $doc.DocumentElement.GetAttribute('status') | Should -Be '200' -Because 'a successful call must survive short stderr'
+        }
     }
 
     It 'is idempotent: redacting already-redacted text changes nothing and re-exposes nothing' {
