@@ -50,11 +50,30 @@ to the scan itself. It is set because it is free, because an account with local 
 not be delegatable, and because it is correct for any other use of the account. The NTLM analogue,
 relay during the scan window, is a separate problem it does not address.
 
-Blocking interactive logon is worth adding and these scripts leave it to you, because the safe mechanism
-is a GPO across the estate rather than an attribute on one object. Use the **Deny log on locally** and
-**Deny log on through Remote Desktop Services** user rights: authenticated scanning needs only *network*
-logon, granted by the separate "Access this computer from the network" right, so denying the interactive
-types cannot break a scan.
+On top of that, the account is denied every logon type a scan does not use. An authenticated scan reaches
+a target only over SMB and DCE-RPC, which are **network** logons (type 3), so the other four can be
+denied outright:
+
+| user right | scan account |
+| --- | --- |
+| Deny log on locally | denied |
+| Deny log on through Remote Desktop Services | denied |
+| Deny log on as a batch job | denied |
+| Deny log on as a service | denied |
+| Deny access to this computer from the network | **not set** — this is the one a scan needs |
+
+Logon rights are per-machine local security policy; no Active Directory attribute sets them. So the
+scalable way to apply this is a GPO linked to the OUs holding your targets, which is how it is done in
+the deployment this came from. `examples/Set-ScanAccountLogonRights.ps1` does the same thing on a single
+machine for a small estate, for a host a GPO does not reach, or just to report what one machine's policy
+actually says — and if a GPO does manage these rights, it reapplies on its own schedule and overwrites
+any local change.
+
+Worth being honest about what this buys: an interactive logon as this account needs the same password a
+network logon needs, and the network path stays open because the scan needs it. So it does not stop
+someone holding the password — it removes other ways to use one if obtained, and makes an interactive
+attempt unambiguous. What prevents misuse is still the account being disabled with a password nobody
+holds.
 
 Be careful with the `LogonWorkstations` attribute ("Log On To…") instead. It looks like the scriptable
 equivalent, but the DC evaluates it against the client workstation name supplied during authentication,
@@ -304,6 +323,9 @@ claim support for a configuration you haven't run.
 
 # 4. Decide how the account gets access on targets — your call.
 #    examples\Add-ScanAccountLocalAdmin.ps1 shows one approach among several.
+#    Then deny it every logon type a scan does not use. A GPO on the target OUs is the scalable way;
+#    examples\Set-ScanAccountLogonRights.ps1 does one machine at a time. Do NOT point that at the
+#    runner: a scheduled task logs on as batch, so denying that right stops the scan starting.
 
 # 5. Register the scan task AND the backstop task — see examples\
 ```
@@ -319,9 +341,9 @@ Two things the scripts cannot do for you:
   where *it* runs, which may not be the runner. If it is missing, the audit trail goes to the task
   log only — you get one warning saying so, rather than silence.
 
-The bootstrap scripts and `weekly-ou-scan.ps1` support `-WhatIf`. Use it first. The scheduled-task
-entry points (`scan-task.ps1`, `backstop-task.ps1`) do not, because they delegate to functions that
-implement it; `Test-ScanAccountLogons.ps1` does not, because it only reads.
+The bootstrap scripts, `weekly-ou-scan.ps1` and `Set-ScanAccountLogonRights.ps1` support `-WhatIf`. Use
+it first. The scheduled-task entry points (`scan-task.ps1`, `backstop-task.ps1`) do not, because they
+delegate to functions that implement it; `Test-ScanAccountLogons.ps1` does not, because it only reads.
 
 ## Gotchas that will cost you an afternoon
 
