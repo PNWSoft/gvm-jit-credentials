@@ -16,11 +16,17 @@ jobs:
         # Windows PowerShell 5.1 is the deployment runtime and parses differently from 7.x --
         # constructs that are fine in pwsh can fail there. Both must pass.
         shell: [powershell, pwsh]
+    # Set here, NOT as `shell:` on each step. A step's `shell` key accepts no contexts at all, so
+    # `shell: ${{ matrix.shell }}` on a step makes the whole workflow file invalid -- every run fails
+    # in 0 seconds with no jobs and only "likely failed because of a workflow file issue" to go on.
+    # jobs.<id>.defaults.run DOES allow the matrix context, and the steps inherit it.
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Parse every script
-        shell: ${{ matrix.shell }}
         run: |
           $bad = 0
           Get-ChildItem -Recurse -Include *.ps1,*.psm1,*.psd1 | Sort-Object FullName | ForEach-Object {
@@ -35,13 +41,11 @@ jobs:
           if ($bad -gt 0) { exit 1 }
 
       - name: Validate module manifest
-        shell: ${{ matrix.shell }}
         run: |
           $m = Test-ModuleManifest ./GvmJitCredential/GvmJitCredential.psd1
           Write-Host "$($m.Name) v$($m.Version): $($m.ExportedFunctions.Keys -join ', ')"
 
       - name: Import module (no RSAT on the runner -- must still load)
-        shell: ${{ matrix.shell }}
         run: |
           Import-Module ./GvmJitCredential/GvmJitCredential.psd1 -Force
           $n = (Get-Command -Module GvmJitCredential).Count
@@ -49,7 +53,6 @@ jobs:
           Write-Host "imported OK with $n exported functions"
 
       - name: Pester
-        shell: ${{ matrix.shell }}
         run: |
           Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
           Import-Module Pester -MinimumVersion 5.5.0 -Force
