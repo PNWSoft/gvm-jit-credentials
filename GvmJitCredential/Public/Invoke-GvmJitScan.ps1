@@ -52,11 +52,11 @@ function Invoke-GvmJitScan {
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$Identity,
-        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$CredentialId,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z')][string]$CredentialId,
         [Parameter(Mandatory)][string]$ScannerHost,
         [Parameter(Mandatory)][string]$GmpHelper,
 
-        [Parameter(Mandatory, ParameterSetName = 'ByTaskId')][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$TaskId,
+        [Parameter(Mandatory, ParameterSetName = 'ByTaskId')][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z')][string]$TaskId,
         [Parameter(Mandatory, ParameterSetName = 'ByScanAction')][scriptblock]$ScanAction,
 
         [string]$IdentityFile = '',
@@ -133,10 +133,10 @@ function Invoke-GvmJitScan {
                     try {
                         $null = Invoke-GmpRequest @gmp -ExpectStatus @('200', '202') `
                                     -Xml ('<stop_task task_id="{0}"/>' -f $TaskId)
-                        Write-JitLog "Scan exceeded MaxScanMinutes ($MaxScanMinutes); task $TaskId stopped" 1011 'Warning' $LogSource
+                        Write-JitLog "Scan exceeded MaxScanMinutes ($MaxScanMinutes); task $TaskId stopped" 1022 'Warning' $LogSource
                     }
                     catch {
-                        Write-JitLog ("Scan exceeded MaxScanMinutes ($MaxScanMinutes) and stop_task also failed: {0}" -f $_.Exception.Message) 1011 'Warning' $LogSource
+                        Write-JitLog ("Scan exceeded MaxScanMinutes ($MaxScanMinutes) and stop_task also failed: {0}" -f $_.Exception.Message) 1022 'Warning' $LogSource
                     }
                     throw "Scan exceeded MaxScanMinutes ($MaxScanMinutes); revoking the credential rather than waiting longer."
                 }

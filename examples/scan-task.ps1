@@ -35,12 +35,12 @@
 
   Exit codes:
     0  scanned, and the credential fully revoked.
-    1  anything else. Usually the scan: it did not reach Done, or it threw. It is also what an
-       exception before the scan produces -- a missing config key, a failed Import-Module, a Grant
-       that failed and rolled itself back. Those leave nothing usable behind, with ONE exception:
-       a grant whose rollback ALSO failed logs event 1903 and can leave the account ENABLED. So
-       check the log for 1903 before reading a 1 as a scan-only problem.
-    2  the revoke reported errors. The account may still be usable: investigate NOW.
+    1  anything else. Usually the scan: it did not reach Done, or it threw. Also an exception before
+       the scan -- a missing config key, a failed Import-Module, or a Grant that failed and rolled
+       itself back cleanly. None of those leave a usable credential behind.
+    2  the account may still be usable: investigate NOW. Either the revoke reported errors, or Grant
+       enabled the account and its own rollback then failed (event 1903), in which case Greenbone may
+       still hold the live password.
     3  scanned and revoked, but the scanner's stored copy was not overwritten (event 1010). Nothing
        usable is left behind; it points at a broken GMP path.
 
@@ -104,9 +104,13 @@ catch {
         $revoke.Errors | ForEach-Object { Write-Error $_ -ErrorAction Continue }
         exit 2      # the account may still be usable: this outranks the scan failure
     }
-    # No revoke record (the grant itself failed, and rolled itself back) or a clean revoke. Either way
-    # the credential is not left usable by this path -- but check the log for event 1903 before
-    # assuming that, because a rollback that ALSO failed reaches here too.
+    if ($_.Exception.Data['GvmJitRollbackFailed']) {
+        # Grant enabled the account, its own rollback failed (event 1903), and Greenbone may hold the
+        # live password. The worst state there is, so it gets the loudest code rather than a 1.
+        Write-Error "Grant rolled back and the rollback FAILED: the account may still be ENABLED. See event 1903." -ErrorAction Continue
+        exit 2
+    }
+    # Otherwise the credential was revoked, or was never granted and Grant rolled itself back cleanly.
     $_ | Out-String | Write-Host
     exit 1
 }

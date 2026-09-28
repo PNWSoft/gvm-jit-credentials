@@ -588,3 +588,99 @@ Describe 'Task registration examples survive powershell.exe -Command' {
         $action.Value | Should -Match 'catch\s*\{' -Because 'a missing or AllSigned-refused script otherwise reports success'
     }
 }
+
+Describe 'Relayed stderr cannot carry a password into the exception message' {
+    # The regression this pins: forwarding gvm-cli's stderr exposed a credential channel. gvm-tools
+    # validates the request BEFORE sending and prints "Invalid XML '<the whole request>'" on failure --
+    # and for a credential push that request holds the plaintext. That string became the exception
+    # message, which Write-JitLog puts in the Windows event log. Confirmed against the live relay with
+    # a canary before this guard existed.
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psd1') -Force
+    }
+
+    It 'redacts a password element that arrives on stderr' {
+        InModuleScope GvmJitCredential {
+            Mock Write-JitLog {}
+            # No stdout, and stderr echoing the request: exactly the gvm-tools parse-error shape.
+            Mock Start-Process {}
+            Mock Get-Content {
+                "gmp-relay.sh: gvm-cli exit 1: Invalid XML '<modify_credential credential_id=" +
+                '"11111111-2222-3333-4444-555555555555"><password>S3cr3t-CANARY</password>' +
+                "</modify_credential>'. Error was Premature end of data"
+            }
+            Mock Out-File {}
+            Mock Remove-Item {}
+            Mock Test-Path { $true }
+            # The ssh invocation itself is the seam: make it produce no stdout so the stderr path runs.
+            Mock Invoke-Expression {}
+            $err = $null
+            try {
+                Invoke-GmpRequest -Xml '<get_version/>' -ScannerHost 'relay@scanner.invalid' `
+                    -GmpHelper '/opt/greenbone/gmp.sh'
+            }
+            catch { $err = $_ }
+            $err | Should -Not -BeNullOrEmpty
+            $err.Exception.Message | Should -Not -Match 'S3cr3t-CANARY' -Because 'a password must never reach the exception message, which is logged'
+            $err.Exception.Message | Should -Match 'redacted'
+        }
+    }
+}
+
+Describe 'A failed Grant rollback reaches the scheduler, not just the event log' {
+    # Worst state there is: the account was enabled, Grant's own rollback failed (event 1903), and the
+    # GMP push may in fact have been applied, so Greenbone can hold the live password. It used to
+    # arrive as a plain exit 1, which the entry points document as "usually the scan".
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psd1') -Force
+    }
+
+    It 'marks the error so an entry point can tell this apart from an ordinary failure' {
+        InModuleScope GvmJitCredential {
+            Mock Write-JitLog {}
+            Mock Resolve-JitDomainController { 'dc1.example.local' }
+            Mock Set-JitAccountEnabled {}
+            Mock New-EphemeralPassword { 'pw-not-secret-in-test' }
+            Mock Set-JitAccountPassword {}
+            # The push fails, so Grant rolls back; the rollback then fails too.
+            Mock Invoke-GmpRequest { throw 'scanner rejected the push' }
+            Mock Revoke-GvmScanCredential { throw 'AD unreachable during rollback' }
+
+            $err = $null
+            try {
+                Grant-GvmScanCredential -Identity 'scan-acct' `
+                    -CredentialId '11111111-2222-3333-4444-555555555555' `
+                    -ScannerHost 'relay@scanner.invalid' -GmpHelper '/opt/greenbone/gmp.sh' `
+                    -ReplicationDelaySeconds 0 -Confirm:$false
+            }
+            catch { $err = $_ }
+
+            $err | Should -Not -BeNullOrEmpty
+            $err.Exception.Message | Should -Match 'scanner rejected the push' -Because 'the ORIGINAL cause must survive'
+            $err.Exception.Data['GvmJitRollbackFailed'] | Should -BeTrue
+        }
+    }
+
+    It 'does not mark the error when the rollback succeeded' {
+        InModuleScope GvmJitCredential {
+            Mock Write-JitLog {}
+            Mock Resolve-JitDomainController { 'dc1.example.local' }
+            Mock Set-JitAccountEnabled {}
+            Mock New-EphemeralPassword { 'pw-not-secret-in-test' }
+            Mock Set-JitAccountPassword {}
+            Mock Invoke-GmpRequest { throw 'scanner rejected the push' }
+            Mock Revoke-GvmScanCredential { [pscustomobject]@{ Errors = @(); Warnings = @() } }
+
+            $err = $null
+            try {
+                Grant-GvmScanCredential -Identity 'scan-acct' `
+                    -CredentialId '11111111-2222-3333-4444-555555555555' `
+                    -ScannerHost 'relay@scanner.invalid' -GmpHelper '/opt/greenbone/gmp.sh' `
+                    -ReplicationDelaySeconds 0 -Confirm:$false
+            }
+            catch { $err = $_ }
+            $err | Should -Not -BeNullOrEmpty
+            $err.Exception.Data['GvmJitRollbackFailed'] | Should -BeNullOrEmpty
+        }
+    }
+}

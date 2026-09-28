@@ -48,10 +48,13 @@ umask 077
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-COMPOSE_DIR="${COMPOSE_DIR:-/opt/greenbone-community-edition}"
 GMP_ENV="${GMP_ENV:-/opt/greenbone/.gmp.env}"
-GVM_TOOLS_SERVICE="${GVM_TOOLS_SERVICE:-gvm-tools}"
-GMP_TIMEOUT="${GMP_TIMEOUT:-300}"
+
+# Cleared rather than read from the environment: only the root-owned .gmp.env checked below may
+# set these. A caller-supplied COMPOSE_DIR would point `docker compose` at a compose file of their
+# choosing, which is root on this host -- a bigger hole than the one the owner check closes.
+# Defaults are applied after that file is sourced.
+unset COMPOSE_DIR GVM_TOOLS_SERVICE GMP_TIMEOUT
 
 die() { printf '%s\n' "gmp-relay.sh: $*" >&2; exit 1; }
 
@@ -76,6 +79,11 @@ owner="$(stat -c '%u' "$GMP_ENV")" || die "cannot stat $GMP_ENV"
 # shellcheck disable=SC1090
 . "$GMP_ENV"
 
+# Defaults applied only now, so they come from .gmp.env or from here -- never from the caller.
+COMPOSE_DIR="${COMPOSE_DIR:-/opt/greenbone-community-edition}"
+GVM_TOOLS_SERVICE="${GVM_TOOLS_SERVICE:-gvm-tools}"
+GMP_TIMEOUT="${GMP_TIMEOUT:-300}"
+
 # Accept either naming: GMP_USER/GMP_PASS or GMP_USERNAME/GMP_PASSWORD.
 user="${GMP_USER:-${GMP_USERNAME:-}}"
 pass="${GMP_PASS:-${GMP_PASSWORD:-}}"
@@ -93,7 +101,14 @@ trap 'rm -rf "$d"' EXIT
 head -c 1048576 > "$d/req.xml"
 [ -s "$d/req.xml" ] || die "no GMP request on stdin"
 
-printf '[gmp]\nusername=%s\npassword=%s\n' "$user" "$pass" > "$d/gvm-tools.conf"
+# gvm-tools reads this with configparser BasicInterpolation, where a lone % is a syntax error
+# whose message QUOTES the value. Doubling makes % passwords work AND keeps them out of the error
+# path. A newline cannot be represented in this format at all, so refuse it rather than emit a
+# ParsingError naming the second line.
+[ "$(printf '%s' "$pass" | wc -l)" -eq 0 ] || die 'GMP_PASS contains a newline, which this config format cannot hold'
+user_ini=$(printf '%s' "$user" | sed 's/%/%%/g')
+pass_ini=$(printf '%s' "$pass" | sed 's/%/%%/g')
+printf '[gmp]\nusername=%s\npassword=%s\n' "$user_ini" "$pass_ini" > "$d/gvm-tools.conf"
 
 # No chown -- see the note in the header. Root-owned and world-readable BY INODE, inside a
 # directory only root can traverse.
@@ -123,10 +138,16 @@ if [ "$rc" -eq 124 ]; then
     die "GMP request timed out after ${GMP_TIMEOUT}s (set GMP_TIMEOUT to change)"
 fi
 
-# On failure, pass the reason up. Bounded, because it is container output and the caller is remote;
-# compose noise lands here too, so the tail is the part that names the actual failure.
+# On failure, pass the reason up -- REDACTED. gvm-tools validates the request BEFORE sending and,
+# on a parse error, prints "Invalid XML '<the whole request>'" -- which for a credential push
+# contains the plaintext. That stderr becomes the caller's exception message and reaches its event
+# log and task log, so password elements are stripped here, where they are produced. Bounded and
+# flattened to one line; the remainder is a Python traceback.
 if [ "$rc" -ne 0 ] && [ -s "$d/err" ]; then
     printf 'gmp-relay.sh: gvm-cli exit %s: ' "$rc" >&2
-    tail -c 2048 "$d/err" >&2
+    sed -e 's#<password>[^<]*</password>#<password>[redacted]</password>#g' \
+        -e 's#^password=.*#password=[redacted]#' "$d/err" \
+        | tail -c 1024 | tr '\n' ' ' >&2
+    printf '\n' >&2
 fi
 exit "$rc"

@@ -49,7 +49,7 @@ function Grant-GvmScanCredential {
     param(
         [Parameter(Mandatory)][string]$Identity,
         # Interpolated into a GMP request body; validated so it cannot inject XML.
-        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$CredentialId,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z')][string]$CredentialId,
         [Parameter(Mandatory)][string]$ScannerHost,
         [Parameter(Mandatory)][string]$GmpHelper,
         [string]$IdentityFile = '',
@@ -97,6 +97,9 @@ function Grant-GvmScanCredential {
         Write-JitLog 'Greenbone credential updated for this scan window' 1003 'Information' $LogSource
     }
     catch {
+        # Captured so the rollback outcome can be attached to it below. A bare `throw` at the end of
+        # this block would rethrow the same error, but there would be no handle on it to mark.
+        $grantError = $_
         Write-JitLog ("Grant FAILED after enabling '$Identity'; rolling back. " + $_.Exception.Message) 1009 'Error' $LogSource
         try {
             # -Strict so a rollback that fails THROWS and lands in the catch below, producing the
@@ -114,8 +117,13 @@ function Grant-GvmScanCredential {
         catch {
             # Rollback failing is the worst case: enabled account, nobody cleaning up. Say so loudly.
             Write-JitLog ("ROLLBACK ALSO FAILED for '$Identity' - the account may still be ENABLED. Investigate immediately: " + $_.Exception.Message) 1903 'Error' $LogSource
+            # Marked on the error so the SCHEDULER can see it, not only the event log. This state --
+            # account enabled, and Greenbone may hold the live password because a "failed" push can
+            # still have been applied -- otherwise reached the task as a plain exit 1, documented as
+            # "usually the scan". The entry points read this key and exit 2 instead.
+            $grantError.Exception.Data['GvmJitRollbackFailed'] = $true
         }
-        throw
+        throw $grantError
     }
     finally {
         # Drops our references. It does NOT zero the strings -- see the README, under "Threat model -- What this does NOT fix". $body is

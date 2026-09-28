@@ -23,8 +23,8 @@
        write. The AD reset has already invalidated that value, so nothing usable is left behind. What
        this signals is a broken GMP path, worth knowing before the next grant needs it.
 
-  There is deliberately no 2 here. scan-task.ps1 uses 2 for a failed revoke because its 1 already
-  means "the scan failed"; this script has no scan, so a failed revoke IS its 1. The two scripts share
+  There is deliberately no 2 here. scan-task.ps1 uses 2 for "the account may still be usable" because
+  its 1 already means "the scan failed"; this script has no scan, so that case IS its 1. The two share
   0 and 3 only -- do not carry a single reading of "1" between them.
 
   A backstop that reports success when part of it failed is worse than no backstop, because you stop

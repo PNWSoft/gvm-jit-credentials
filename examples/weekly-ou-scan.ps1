@@ -44,10 +44,9 @@
 .NOTES
   Exit codes, the same meanings scan-task.ps1 uses:
     0  scanned, and the credential fully revoked.
-    1  anything else -- the scan did not reach Done, or something threw. Check the log for event 1903
-       before reading it as scan-only: a grant whose rollback also failed lands here and can leave the
-       account ENABLED.
-    2  the revoke reported errors. The account may still be usable: investigate NOW.
+    1  anything else -- the scan did not reach Done, or something threw before it.
+    2  the account may still be usable: investigate NOW. Either the revoke reported errors, or Grant's
+       own rollback failed (event 1903) and Greenbone may still hold the live password.
     3  scanned and revoked, but the scanner's stored copy was not overwritten (event 1010).
 
   Registering this as a scheduled task: powershell.exe -Command does NOT propagate a script's exit
@@ -72,13 +71,13 @@ param(
     [Parameter(Mandatory)][string]$GmpHelper,
     # All four are interpolated into GMP request bodies. Validating them here means a mistyped or
     # tampered config file fails immediately rather than producing a malformed -- or injected -- request.
-    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$CredentialId,
-    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$ConfigId,
-    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$ScannerId,
-    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$PortListId,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z')][string]$CredentialId,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z')][string]$ConfigId,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z')][string]$ScannerId,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z')][string]$PortListId,
     [Parameter(Mandatory)][string]$SearchBase,
     [string]$TargetSubnet = '',
-    [ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$AlertId = '',
+    [ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z')][string]$AlertId = '',
     [string]$IdentityFile = '',
     # Records the host set and task UUID from the last run, so an unchanged host set can reuse
     # its task instead of orphaning one per run. Delete it to force a fresh task.
@@ -178,7 +177,7 @@ if ($state) {
     # task is then checked against this run's parameters. An attacker who could substitute a task
     # UUID would otherwise have the runner enable the local-admin account and scan hosts of their
     # choosing -- e.g. a machine they control, capturing NTLM for relay.
-    if ($prevTask -and $prevTask -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+    if ($prevTask -and $prevTask -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z') {
         Write-Warning "State file TaskId is not a UUID ('$prevTask'); ignoring it and creating a new task."
         $prevTask = ''
     }
@@ -308,8 +307,10 @@ catch {
         $revoke.Errors | ForEach-Object { Write-Error $_ -ErrorAction Continue }
         exit 2      # the account may still be usable: outranks the scan failure
     }
-    # Check the log for event 1903 before reading this as scan-only: a grant whose rollback ALSO
-    # failed reaches here too, and leaves the account enabled.
+    if ($_.Exception.Data['GvmJitRollbackFailed']) {
+        Write-Error "Grant rolled back and the rollback FAILED: the account may still be ENABLED. See event 1903." -ErrorAction Continue
+        exit 2
+    }
     $_ | Out-String | Write-Host
     exit 1
 }

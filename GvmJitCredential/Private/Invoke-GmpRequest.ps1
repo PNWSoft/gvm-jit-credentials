@@ -91,7 +91,13 @@ function Invoke-GmpRequest {
         if ($null -ne $raw) { $stderr = [string]$raw }
         Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
     }
-    if ($stderr) { $stderr = $stderr.Trim() }
+    if ($stderr) {
+        # Redacted before this string can reach an exception message, Write-JitLog and the event
+        # log. The relay strips password elements at the source; this is the second layer, because
+        # gvm-tools echoes the REQUEST on a parse error and that request carries the plaintext.
+        $stderr = [regex]::Replace($stderr.Trim(), '(?is)<password>.*?</password>', '<password>[redacted]</password>')
+        if ($stderr.Length -gt 1024) { $stderr = $stderr.Substring(0, 1024) + ' ...[truncated]' }
+    }
 
     $text = [string]$response
     if ([string]::IsNullOrWhiteSpace($text)) {

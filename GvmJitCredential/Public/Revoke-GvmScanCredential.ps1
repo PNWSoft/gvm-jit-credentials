@@ -175,7 +175,7 @@ function Revoke-GvmScanCredential {
         $result.Warnings.Add($msg)
         Write-JitLog $msg 1010 'Warning' $LogSource
     }
-    elseif ($CredentialId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+    elseif ($CredentialId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z') {
         $msg = "Skipped overwriting the Greenbone-stored value: CredentialId '$CredentialId' is not a " +
                'UUID. The AD reset above has already invalidated that value, so nothing usable is left behind.'
         $result.Warnings.Add($msg)
