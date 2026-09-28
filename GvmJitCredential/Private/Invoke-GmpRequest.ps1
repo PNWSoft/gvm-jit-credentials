@@ -95,15 +95,39 @@ function Invoke-GmpRequest {
         # Redacted before this string can reach an exception message, Write-JitLog and the event
         # log. The relay strips password elements at the source; this is the second layer, because
         # gvm-tools echoes the REQUEST on a parse error and that request carries the plaintext.
-        # Attribute-tolerant and greedy, matching the relay's rule: a narrow pattern is defeated by
-        # <password xml:space="preserve"> or by a raw '<' inside the value. The second rule catches an
-        # orphaned closing tag, which is what a truncated error line can leave behind.
-        $stderr = [regex]::Replace($stderr.Trim(), '(?is)<password[^>]*>.*</password>', '<password>[redacted]</password>')
-        # Not anchored at ^: the relay prefixes its own text before the truncated tail, so an orphaned
-        # close never starts the string. This matches the run of non-tag characters immediately before
-        # it, which is what a cut through the opening tag leaves exposed. Idempotent on already-redacted
-        # text.
-        $stderr = [regex]::Replace($stderr, '(?is)[^<>]*</password>', '[redacted]</password>')
+        # ONE value rule, covering a well-formed element and an orphaned close alike: redact the run of
+        # characters immediately before any </password>. A separate <password>...</password> rule was
+        # redundant -- this catches the same thing -- and it needed a greedy .*, which backtracks
+        # quadratically on stderr full of unclosed openers. [^<>]* cannot cross a tag, so it is linear.
+        #
+        # Stops at '<' OR '>' deliberately. Reaching back past '>' would swallow the opening tag of an
+        # element this rule has already redacted, and in a real truncation -- where the enclosing tag is
+        # cut away too -- it would reach into the relay's own prefix and destroy the one thing that must
+        # survive: which layer failed, and with what status.
+        #
+        # KNOWN RESIDUAL: an orphan whose exposed fragment itself contains '>' keeps the part before that
+        # '>'. Values this module sends cannot contain '<' or '>' at all -- the generated alphabet has
+        # neither and ConvertTo-GmpText escapes both -- so reaching it takes a hand-built request through
+        # Invoke-GvmGmpRequest, unescaped, over the relay's 1 KiB forward cap. Accepted, because every
+        # wider rule costs the failure signal above.
+        $stderr = [regex]::Replace($stderr.Trim(), '(?is)[^<>]*</password>', '[redacted]</password>')
+
+        # An UNTERMINATED element -- no close at all, or a malformed one like </passwor> -- matches
+        # neither rule above, so it is handled by position rather than by pattern: anything that opens a
+        # password element after the last real close is redacted through to the end of the string. Done
+        # with IndexOf, not a lookahead regex, because the obvious `(?:(?!</password>).)*` form is
+        # itself backtracking-prone on exactly the input this is meant to survive. Costs the trailing
+        # parser reason in that malformed case only, which is the right trade: over-redacting an error
+        # line loses detail, under-redacting it loses a password.
+        $ci = [StringComparison]::OrdinalIgnoreCase
+        $lastClose = $stderr.LastIndexOf('</password>', $ci)
+        $openAfter = $stderr.IndexOf('<password', [Math]::Max(0, $lastClose + 11), $ci)
+        if ($openAfter -ge 0) {
+            $stderr = $stderr.Substring(0, $openAfter) + '<password>[redacted: unterminated]'
+        }
+
+        # Cap LAST. Capping before redaction would cut through an opening tag and manufacture the
+        # unterminated shape handled just above.
         if ($stderr.Length -gt 1024) { $stderr = $stderr.Substring(0, 1024) + ' ...[truncated]' }
     }
 

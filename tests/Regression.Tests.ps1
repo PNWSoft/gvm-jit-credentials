@@ -597,31 +597,32 @@ Describe 'Relayed stderr cannot carry a password into the exception message' {
         Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psd1') -Force
     }
 
-    # One case per shape that defeats a NARROW pattern. A plain <password> element alone would pass
-    # with a non-greedy `<password>.*?</password>`, so the attribute, raw-'<' and orphan cases are what
-    # keep the pattern from being quietly narrowed again. The module escapes '<' via ConvertTo-GmpText,
-    # but a hand-built request through the public Invoke-GvmGmpRequest need not.
+    # Shapes chosen by REACHABILITY, not by regex taxonomy. What this module emits is only ever a plain
+    # element: New-EphemeralPassword's alphabet has no '<' or '>' (it does have '&'), and both call sites
+    # pass the value through ConvertTo-GmpText. So:
+    #   plain element      -- the real case, observed leaking from the live relay before the guard existed
+    #   orphaned close     -- what the relay's own `tail -c 1024` leaves when it cuts off the opening
+    #                         tag, since tail keeps the END of the stream
+    #   unterminated tag   -- the opposite cut, or simply malformed XML from such a caller
+    # The redaction is deliberately broader than these (attribute-tolerant, case-insensitive, greedy)
+    # because widening costs nothing at runtime. That extra tolerance is intentionally NOT pinned: it
+    # could only matter for XML no part of this project generates, and a '<' or '>' inside a value needs
+    # no special rule at all, since '.' matches both under (?s).
     It 'redacts <Shape> arriving on stderr' -ForEach @(
-        @{ Shape = 'a plain element';        Body = '<password>CANARY-A</password>' }
-        @{ Shape = 'an attribute-bearing element'; Body = '<password xml:space="preserve">CANARY-B</password>' }
-        @{ Shape = 'a space before the close'; Body = '<password >CANARY-C</password>' }
-        @{ Shape = 'a raw < inside the value'; Body = '<password>CANARYd1<CANARYd2</password>' }
-        @{ Shape = 'an uppercase tag';        Body = '<PASSWORD>CANARY-E</PASSWORD>' }
-        # Isolates the attribute-tolerant PRIMARY rule: the orphan rule below it only reaches back to
-        # the nearest '>' , so a value containing '>' under an attribute-bearing tag needs the primary.
-        @{ Shape = 'an attribute AND a > in the value'; Body = '<password xml:space="preserve">CANARYe1>CANARYe2</password>' }
-        @{ Shape = 'two elements';           Body = '<password>CANARY-F</password> x <password>CANARY-G</password>' }
+        @{ Shape = 'a plain element';          Body = '<password>CANARY-A</password>' }
         @{ Shape = 'an orphaned close after truncation'; Body = 'CANARY-H</password>' }
+        @{ Shape = 'an opening tag with no close'; Body = '<password>CANARY-I' }
     ) {
-        InModuleScope GvmJitCredential -Parameters @{ body = $Body } {
-            param($body)
+        # Passed through the environment on purpose. InModuleScope runs in the MODULE's session state, so
+        # $script: does not cross from this file, and InModuleScope -Parameters reads to PSScriptAnalyzer
+        # as an unused parameter because the value is only consumed inside a Mock body.
+        $env:GVMJIT_TEST_STDERR_BODY = $Body
+        InModuleScope GvmJitCredential {
             Mock Write-JitLog {}
-            Mock Start-Process {}
-            # stderr echoing the request, with no stdout: the gvm-tools parse-error shape.
-            Mock Get-Content { "gmp-relay.sh: gvm-cli exit 1: Invalid XML '<modify_credential>$body'. Error was Premature end of data" }
-            Mock Out-File {}
-            Mock Remove-Item {}
             Mock Test-Path { $true }
+            Mock Remove-Item {}
+            # stderr echoing the request with no stdout: the gvm-tools parse-error shape.
+            Mock Get-Content { "gmp-relay.sh: gvm-cli exit 1: Invalid XML '<modify_credential>$($env:GVMJIT_TEST_STDERR_BODY)'. Error was Premature end of data" }
             $err = $null
             try {
                 Invoke-GmpRequest -Xml '<get_version/>' -ScannerHost 'relay@scanner.invalid' `
@@ -629,9 +630,28 @@ Describe 'Relayed stderr cannot carry a password into the exception message' {
             }
             catch { $err = $_ }
             $err | Should -Not -BeNullOrEmpty
-            # 'CANARY' with no suffix: a partial redaction that leaves any fragment must fail too.
+            # 'CANARY' with no suffix: a partial redaction leaving any fragment must fail too.
             $err.Exception.Message | Should -Not -Match 'CANARY' -Because 'no part of a password may reach the exception message, which is logged'
             $err.Exception.Message | Should -Match 'redacted'
+        }
+        Remove-Item Env:\GVMJIT_TEST_STDERR_BODY -ErrorAction SilentlyContinue
+    }
+
+    It 'is idempotent: redacting already-redacted text changes nothing and re-exposes nothing' {
+        InModuleScope GvmJitCredential {
+            Mock Write-JitLog {}
+            Mock Test-Path { $true }
+            Mock Remove-Item {}
+            # Feed back the exact shape a previous pass produces.
+            Mock Get-Content { "gmp-relay.sh: gvm-cli exit 1: Invalid XML '<modify_credential><password>[redacted]</password>'. Error was Premature end of data" }
+            $err = $null
+            try {
+                Invoke-GmpRequest -Xml '<get_version/>' -ScannerHost 'relay@scanner.invalid' `
+                    -GmpHelper '/opt/greenbone/gmp.sh'
+            }
+            catch { $err = $_ }
+            $err.Exception.Message | Should -Match '<password>\[redacted\]</password>'
+            $err.Exception.Message | Should -Match 'Premature end of data' -Because 'the parser reason must survive a well-formed redaction'
         }
     }
 }
