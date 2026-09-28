@@ -111,8 +111,15 @@ head -c 1048576 > "$d/req.xml"
 # gvm-tools reads this with configparser BasicInterpolation, where a lone % is a syntax error
 # whose message QUOTES the value. Doubling makes % passwords work AND keeps them out of the error
 # path. A newline cannot be represented in this format at all, so refuse it rather than emit a
-# ParsingError naming the second line.
-[ "$(printf '%s' "$pass" | wc -l)" -eq 0 ] || die 'GMP_PASS contains a newline, which this config format cannot hold'
+# ParsingError naming the second line. CR counts too: gvm-tools opens the file in text mode, where a
+# lone \r is a line break, so it splits the value exactly as \n would.
+# $'\n' and $'\r', NOT "$(printf '\n')": command substitution strips trailing newlines, so the printf
+# form yields an empty string and the pattern then matches every value. This script is bash, so
+# ANSI-C quoting is available and literal.
+case "$pass$user" in
+    *$'\n'* | *$'\r'*)
+        die 'GMP_USER or GMP_PASS contains a line break, which this config format cannot hold' ;;
+esac
 user_ini=$(printf '%s' "$user" | sed 's/%/%%/g')
 pass_ini=$(printf '%s' "$pass" | sed 's/%/%%/g')
 printf '[gmp]\nusername=%s\npassword=%s\n' "$user_ini" "$pass_ini" > "$d/gvm-tools.conf"
@@ -152,8 +159,11 @@ fi
 # flattened to one line; the remainder is a Python traceback.
 if [ "$rc" -ne 0 ] && [ -s "$d/err" ]; then
     printf 'gmp-relay.sh: gvm-cli exit %s: ' "$rc" >&2
-    sed -e 's#<password>[^<]*</password>#<password>[redacted]</password>#g' \
-        -e 's#^password=.*#password=[redacted]#' "$d/err" \
+    # Greedy and attribute-tolerant on purpose: <password xml:space="preserve"> and a raw '<' inside
+    # the value both defeat a narrow pattern, and over-redacting an error line costs nothing while
+    # under-redacting it leaks. Redaction runs BEFORE the truncation, so a kept fragment cannot
+    # contain an unredacted value.
+    sed -e 's#<password[^>]*>.*</password>#<password>[redacted]</password>#g' "$d/err" \
         | tail -c 1024 | tr '\n' ' ' >&2
     printf '\n' >&2
 fi

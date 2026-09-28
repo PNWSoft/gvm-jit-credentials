@@ -98,6 +98,12 @@ running.
   window. Script Block Logging (4104) does not leak values here, because nothing builds dynamic
   script blocks. If your estate mandates Module Logging, exempt this task or accept that the window
   is only as private as that event log.
+- **Error text from the scanner is redacted, not trusted.** `gvm-tools` validates a GMP request before
+  sending it and echoes the whole request on a parse error — which for a credential push contains the
+  plaintext. The relay strips `<password>` elements from anything it forwards, `Invoke-GmpRequest`
+  strips them again on arrival, and the relay never forwards the shell's own error when `.gmp.env`
+  fails to parse. If you extend the GMP surface, keep both layers: the module's own requests are
+  escaped and short, but a hand-built request through `Invoke-GvmGmpRequest` need not be either.
 - **Anyone who is already admin on the runner host** can do all of this themselves. This defends
   the credential at rest, not the machine that legitimately holds it.
 - **Nor does it defend the scanner host.** This moves the standing secret out of the appliance
@@ -342,7 +348,7 @@ AD or GMP directly instead of through those seams, it becomes untestable — ple
 Extracted from a working deployment, then run against it. As of 0.1.0 every script here had been
 executed against a live Greenbone 22.7 instance and a multi-DC Active Directory domain: the full
 grant/scan/revoke lifecycle, task reuse and its refusal path, the AD delegation, the scanner relay
-under load, and the backstop's failure path including a deliberately failing revoke. The 81-case test
+under load, and the backstop's failure path including a deliberately failing revoke. The 88-case test
 suite needs neither.
 
 The three scheduled-task entry points were re-verified as a signed deployment, run by the runner gMSA
@@ -362,21 +368,9 @@ under `-ExecutionPolicy AllSigned`. What was observed live, as distinct from wha
 Authentication was confirmed from the scan report itself — `login/SMB/success: TRUE` — rather than from
 the scan merely finishing.
 
-Several defects were reachable only that way, and are worth knowing about if you adapt this: a partial
-revoke that reported success, an exit code made unreachable by `Write-Error` under
-`$ErrorActionPreference = 'Stop'`, and a registration example whose `-Command` wrapper discarded every
-exit code documented here.
-
-The one that matters most was self-inflicted and caught by audit rather than by testing. Forwarding
-`gvm-cli`'s stderr — added so that a wrong GMP password would stop looking like an SSH fault — opened a
-credential channel: `gvm-tools` validates the request *before* sending and prints the whole request on
-a parse error, which for a credential push contains the password, and that string became the thrown
-message the module writes to the Windows event log. The relay now redacts `<password>` elements where
-they are produced, `Invoke-GmpRequest` redacts again on arrival, and the relay no longer forwards the
-shell's own error when `.gmp.env` fails to parse, which leaked the same way by a different route. All
-three were verified with a canary password against the live relay, before and after.
-
-Each fix has a test, and each test was confirmed to fail with its fix reverted.
+What the suite does **not** cover: there are no tests for the shell in `host/`, and the entry points'
+`exit 2` for a failed grant rollback is asserted at the module level rather than through a child
+process. The rest of the exit-code contract runs as a real child process against a stub module.
 
 That is not a claim of correctness — it is a statement that nothing here is untried, which for this
 kind of tool is the minimum bar. It supports one configuration for the same reason.

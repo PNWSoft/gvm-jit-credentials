@@ -136,8 +136,8 @@ Describe 'Invoke-GvmJitScan survives a failing Grant' {
     }
 
     It 'propagates a Grant failure without throwing from the finally block' {
-        # Grant used to be called OUTSIDE the try, so a throw skipped the finally entirely. Moving it
-        # inside means the finally runs -- and must cope with $grant being null.
+        # Grant runs INSIDE the try so the finally always gets a chance to revoke; the finally must
+        # therefore cope with $grant being null, which is the state when Grant itself threw.
         Mock -ModuleName GvmJitCredential Grant-GvmScanCredential { throw 'scanner unreachable' }
         { Invoke-GvmJitScan @common -TaskId '99999999-8888-7777-6666-555555555555' } | Should -Throw '*scanner unreachable*'
     }
@@ -337,11 +337,10 @@ Describe 'Input validation at the boundary' {
     }
 
     It 'still revokes AD when the grant record has a malformed CredentialId, rather than refusing to start' {
-        # This used to throw, and Revoke's CredentialId parameter used to carry a ValidatePattern, so a
-        # bad id was rejected at BINDING -- before the account was disabled. That inverted the point of
-        # the function: the AD revoke is the security boundary, the Greenbone overwrite is hygiene.
-        # Concrete case it broke: config.psd1 filled in from a -WhatIf bootstrap run holds
-        # CredentialId = '<not created>', and the weekly backstop then failed without disabling anything.
+        # The AD revoke is the security boundary; the Greenbone overwrite is hygiene. A bad CredentialId
+        # must therefore degrade step 3, never prevent step 1 -- so no ValidatePattern on that parameter
+        # and no throw here, because both reject before the account is disabled. Realistic input:
+        # config.psd1 filled in from a -WhatIf bootstrap run holds CredentialId = '<not created>'.
         Mock -ModuleName GvmJitCredential Resolve-JitDomainController { 'dc1.example.local' }
         Mock -ModuleName GvmJitCredential Write-JitLog {}
         $script:disabled = $false
@@ -351,9 +350,9 @@ Describe 'Input validation at the boundary' {
         Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'must not be called with a bad id' }
 
         # Called directly, NOT inside a { } passed to Should -Not -Throw: assignment inside that
-        # scriptblock is local to it, so $r stayed $null and the assertions below silently examined
-        # nothing ($null.Count is 0, which is how this was caught). A throw here fails the test anyway,
-        # so the guarantee is the same and the result is actually usable.
+        # scriptblock is local to it, so $r would be $null and every assertion below would silently
+        # examine nothing ($null.Count is 0, not an error). A throw here fails the test anyway, so the
+        # guarantee is the same and the result is usable.
         $r = Revoke-GvmScanCredential -Grant ([pscustomobject]@{
                     Identity = 'a'; CredentialId = '<not created>'
                     ScannerHost = 'gvm-relay@scanner.example.local'; GmpHelper = '/opt/greenbone/gmp.sh' })
@@ -590,30 +589,39 @@ Describe 'Task registration examples survive powershell.exe -Command' {
 }
 
 Describe 'Relayed stderr cannot carry a password into the exception message' {
-    # The regression this pins: forwarding gvm-cli's stderr exposed a credential channel. gvm-tools
-    # validates the request BEFORE sending and prints "Invalid XML '<the whole request>'" on failure --
-    # and for a credential push that request holds the plaintext. That string became the exception
-    # message, which Write-JitLog puts in the Windows event log. Confirmed against the live relay with
-    # a canary before this guard existed.
+    # gvm-tools validates a request BEFORE sending it and prints "Invalid XML '<the whole request>'" on
+    # failure -- and for a credential push that request holds the plaintext. The relay forwards that
+    # stderr so a GMP auth failure is diagnosable, and this module puts it in an exception message that
+    # Write-JitLog writes to the Windows event log. Both layers must redact, or that path leaks.
     BeforeAll {
         Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'GvmJitCredential\GvmJitCredential.psd1') -Force
     }
 
-    It 'redacts a password element that arrives on stderr' {
-        InModuleScope GvmJitCredential {
+    # One case per shape that defeats a NARROW pattern. A plain <password> element alone would pass
+    # with a non-greedy `<password>.*?</password>`, so the attribute, raw-'<' and orphan cases are what
+    # keep the pattern from being quietly narrowed again. The module escapes '<' via ConvertTo-GmpText,
+    # but a hand-built request through the public Invoke-GvmGmpRequest need not.
+    It 'redacts <Shape> arriving on stderr' -ForEach @(
+        @{ Shape = 'a plain element';        Body = '<password>CANARY-A</password>' }
+        @{ Shape = 'an attribute-bearing element'; Body = '<password xml:space="preserve">CANARY-B</password>' }
+        @{ Shape = 'a space before the close'; Body = '<password >CANARY-C</password>' }
+        @{ Shape = 'a raw < inside the value'; Body = '<password>CANARYd1<CANARYd2</password>' }
+        @{ Shape = 'an uppercase tag';        Body = '<PASSWORD>CANARY-E</PASSWORD>' }
+        # Isolates the attribute-tolerant PRIMARY rule: the orphan rule below it only reaches back to
+        # the nearest '>' , so a value containing '>' under an attribute-bearing tag needs the primary.
+        @{ Shape = 'an attribute AND a > in the value'; Body = '<password xml:space="preserve">CANARYe1>CANARYe2</password>' }
+        @{ Shape = 'two elements';           Body = '<password>CANARY-F</password> x <password>CANARY-G</password>' }
+        @{ Shape = 'an orphaned close after truncation'; Body = 'CANARY-H</password>' }
+    ) {
+        InModuleScope GvmJitCredential -Parameters @{ body = $Body } {
+            param($body)
             Mock Write-JitLog {}
-            # No stdout, and stderr echoing the request: exactly the gvm-tools parse-error shape.
             Mock Start-Process {}
-            Mock Get-Content {
-                "gmp-relay.sh: gvm-cli exit 1: Invalid XML '<modify_credential credential_id=" +
-                '"11111111-2222-3333-4444-555555555555"><password>S3cr3t-CANARY</password>' +
-                "</modify_credential>'. Error was Premature end of data"
-            }
+            # stderr echoing the request, with no stdout: the gvm-tools parse-error shape.
+            Mock Get-Content { "gmp-relay.sh: gvm-cli exit 1: Invalid XML '<modify_credential>$body'. Error was Premature end of data" }
             Mock Out-File {}
             Mock Remove-Item {}
             Mock Test-Path { $true }
-            # The ssh invocation itself is the seam: make it produce no stdout so the stderr path runs.
-            Mock Invoke-Expression {}
             $err = $null
             try {
                 Invoke-GmpRequest -Xml '<get_version/>' -ScannerHost 'relay@scanner.invalid' `
@@ -621,7 +629,8 @@ Describe 'Relayed stderr cannot carry a password into the exception message' {
             }
             catch { $err = $_ }
             $err | Should -Not -BeNullOrEmpty
-            $err.Exception.Message | Should -Not -Match 'S3cr3t-CANARY' -Because 'a password must never reach the exception message, which is logged'
+            # 'CANARY' with no suffix: a partial redaction that leaves any fragment must fail too.
+            $err.Exception.Message | Should -Not -Match 'CANARY' -Because 'no part of a password may reach the exception message, which is logged'
             $err.Exception.Message | Should -Match 'redacted'
         }
     }

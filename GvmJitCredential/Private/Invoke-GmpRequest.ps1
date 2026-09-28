@@ -95,7 +95,15 @@ function Invoke-GmpRequest {
         # Redacted before this string can reach an exception message, Write-JitLog and the event
         # log. The relay strips password elements at the source; this is the second layer, because
         # gvm-tools echoes the REQUEST on a parse error and that request carries the plaintext.
-        $stderr = [regex]::Replace($stderr.Trim(), '(?is)<password>.*?</password>', '<password>[redacted]</password>')
+        # Attribute-tolerant and greedy, matching the relay's rule: a narrow pattern is defeated by
+        # <password xml:space="preserve"> or by a raw '<' inside the value. The second rule catches an
+        # orphaned closing tag, which is what a truncated error line can leave behind.
+        $stderr = [regex]::Replace($stderr.Trim(), '(?is)<password[^>]*>.*</password>', '<password>[redacted]</password>')
+        # Not anchored at ^: the relay prefixes its own text before the truncated tail, so an orphaned
+        # close never starts the string. This matches the run of non-tag characters immediately before
+        # it, which is what a cut through the opening tag leaves exposed. Idempotent on already-redacted
+        # text.
+        $stderr = [regex]::Replace($stderr, '(?is)[^<>]*</password>', '[redacted]</password>')
         if ($stderr.Length -gt 1024) { $stderr = $stderr.Substring(0, 1024) + ' ...[truncated]' }
     }
 

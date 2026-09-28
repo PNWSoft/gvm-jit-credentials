@@ -113,8 +113,7 @@ if ($r.Warnings.Count -gt 0) {
     $r.Warnings | ForEach-Object { "  warning: $_" }
     # Distinct from both outcomes above. -Strict has already thrown if the AD revoke failed, so
     # reaching here means the account IS secured and this is not an emergency -- but the scheduler
-    # must not show a clean run when part of the job did not happen. Verified by running it: a bad
-    # CredentialId used to produce greenboneBlanked=False and still exit 0.
+    # must not show a clean run when part of the job did not happen.
     exit 3
 }
 exit 0
