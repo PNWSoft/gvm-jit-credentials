@@ -64,18 +64,30 @@ if ($existing) {
 elseif ($PSCmdlet.ShouldProcess($Identity, 'Create disabled AD scan account')) {
     $module = Get-Module GvmJitCredential
     $initial = & $module { New-EphemeralPassword -Length 32 }
+    # -AccountNotDelegated sets "Account is sensitive and cannot be delegated" (the NOT_DELEGATED bit in
+    # userAccountControl). This account holds local administrator on every target, so its Kerberos
+    # ticket must not be forwardable by a service it authenticates to -- otherwise compromising any one
+    # of those services lets an attacker impersonate it onward to the rest. It costs nothing here,
+    # because nothing legitimately delegates on this account's behalf.
+    #
+    # NOTE: do not put a comment between these backtick-continued lines. It parses, and then silently
+    # ENDS the command -- every parameter after the comment is dropped, which the CI parse gate cannot
+    # see. That is how this very parameter, and -Description, went missing once.
     New-ADUser -Name $Identity -SamAccountName $Identity -DisplayName $DisplayName `
         -Path $Path -Server $pdc `
         -AccountPassword (ConvertTo-SecureString $initial -AsPlainText -Force) `
         -Enabled $false `
         -PasswordNeverExpires $true `
         -CannotChangePassword $true `
+        -AccountNotDelegated $true `
         -Description 'Disabled between scans. Password rotated per scan by GvmJitCredential. Do NOT add to privileged groups.'
     Remove-Variable initial
     $account = Get-ADUser -Filter "SamAccountName -eq '$Identity'" -Server $pdc
     Write-Host "  created '$Identity' (DISABLED)" -ForegroundColor Green
     Write-Host '  -CannotChangePassword does not block rotation: that flag stops the USER changing' -ForegroundColor DarkGray
     Write-Host '  their own password; the module uses an administrative reset, which is unaffected.' -ForegroundColor DarkGray
+    Write-Host '  marked sensitive and cannot be delegated, so its ticket is not forwardable by a' -ForegroundColor DarkGray
+    Write-Host '  service it authenticates to.' -ForegroundColor DarkGray
 }
 else { return }
 

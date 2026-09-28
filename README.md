@@ -39,9 +39,21 @@ copy in the scanner database stale at the end of each scan. Being able to do exa
 mechanism this relies on.
 
 So the SCAN account used here is an ordinary one, deliberately shaped like a service identity: created
-disabled, unable to change its own password, and with a password no human ever holds. What a gMSA would
-manage on a schedule of its own is done explicitly instead, on the schedule the scan actually runs on.
-Denying it interactive logon rights by GPO is a sensible addition, and one these scripts leave to you.
+disabled, unable to change its own password, marked *sensitive and cannot be delegated*, and with a
+password no human ever holds. What a gMSA would manage on a schedule of its own is done explicitly
+instead, on the schedule the scan actually runs on.
+
+Blocking interactive logon is worth adding and these scripts leave it to you, because the safe mechanism
+is a GPO across the estate rather than an attribute on one object. Use the **Deny log on locally** and
+**Deny log on through Remote Desktop Services** user rights: authenticated scanning needs only *network*
+logon, granted by the separate "Access this computer from the network" right, so denying the interactive
+types cannot break a scan.
+
+Be careful with the `LogonWorkstations` attribute ("Log On To…") instead. It looks like the scriptable
+equivalent, but the DC evaluates it against the client workstation name supplied during authentication,
+and a Linux SMB client sends whatever it likes there — so restricting it can lock the scanner out, with
+a failure that reads like a bad credential. Pinning it to the scanner's name is appealing hardening, but
+test it against your own client before relying on it.
 
 The RUNNER account, by contrast, is a gMSA in this deployment and in the examples — that is precisely
 where one fits, because its password is never handed to anything. The distinction is not gMSA versus
