@@ -5,4 +5,13 @@
 *.psd1  text eol=crlf
 *.psm1  text eol=crlf
 *.sh    text eol=lf
+
+# Everything under host/ is destined for the Linux scanner, including files that are not .sh.
+# gmp.env.example matters most: the operator copies it to .gmp.env, and the relay SOURCES that with
+# /bin/sh as root. Measured on the target (Ubuntu, /bin/sh -> dash): sourcing a CRLF file gives a value
+# with a trailing carriage return -- GMP_PASS='abc' yields length 4, not 3 -- so a Windows checkout of
+# this template would produce credentials that fail to authenticate while looking correct in an editor.
+# Quoting does not save it; dash keeps the CR either way.
+host/*  text eol=lf
+
 *.md    text

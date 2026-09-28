@@ -101,6 +101,22 @@ jobs:
           fi
           [ "$bad" -eq 0 ] || { echo 'PowerShell files must be covered by eol=crlf; see .gitattributes'; exit 1; }
 
+      - name: Files bound for the Linux scanner must be LF
+        # Same reasoning in the other direction, and with a sharper failure. Everything under host/ is
+        # copied to the scanner, and gmp.env.example becomes .gmp.env, which the relay SOURCES with
+        # /bin/sh as root. Measured on Ubuntu (/bin/sh -> dash): a CRLF file yields values with a
+        # trailing carriage return, quoted or not, so the credentials fail to authenticate while looking
+        # perfectly correct in an editor. The attribute is what must hold, for the same reason as above:
+        # the checked-out bytes cannot disagree with it.
+        run: |
+          bad=0
+          while IFS= read -r f; do
+            attr=$(git check-attr eol -- "$f" | sed 's/.*: //')
+            if [ "$attr" != "lf" ]; then echo "eol attribute is '$attr', expected 'lf': $f"; bad=1; fi
+          done < <(git ls-files 'host/*')
+          [ "$bad" -eq 0 ] || { echo 'Files under host/ must be covered by eol=lf; see .gitattributes'; exit 1; }
+          echo 'clean'
+
       - name: No environment-specific values committed
         run: |
           # Patterns are deliberately GENERIC. An earlier version of this gate listed the maintainer's
