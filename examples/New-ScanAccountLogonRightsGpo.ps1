@@ -165,12 +165,14 @@ $domainDn = (Get-ADDomain).DistinguishedName
 # "who is this and what are they" when the script is already talking to Active Directory -- and it avoids
 # NTAccount.Translate(), whose name-to-SID cache can return the SID of a DELETED account after a name has
 # been recreated. A stale SID in a deny right denies nothing to nobody while looking correct in a report.
-$samName = ($Identity -split '\')[-1]
+# [char]92 rather than a literal backslash: this has to survive being edited by tooling that treats a
+# backslash as an escape, and a lone '\' is also an invalid regex, so Split on a char beats -split here.
+$samName = $Identity.Split([char]92)[-1]
 $adObj = Get-ADObject -Filter "sAMAccountName -eq '$samName'" -Server $pdc `
             -Properties objectSid, objectClass -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $adObj) {
-    throw "No object with sAMAccountName '$samName' on $pdc. Pass -Identity as DOMAIN
-ame for an account in this domain."
+    throw ("No object with sAMAccountName '$samName' on $pdc. Pass -Identity as " +
+           'DOMAIN' + [char]92 + 'name for an account in this domain.')
 }
 $sid = $adObj.objectSid.Value
 Write-Host "$Identity resolves to $sid (class '$($adObj.objectClass)', from $pdc)"
