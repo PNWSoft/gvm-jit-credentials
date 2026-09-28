@@ -76,8 +76,15 @@ esac
 owner="$(stat -c '%u' "$GMP_ENV")" || die "cannot stat $GMP_ENV"
 [ "$owner" -eq 0 ] || die "$GMP_ENV is owned by uid $owner, not root; refusing to source it as root"
 
+# Sourcing errors are SUPPRESSED, not forwarded. This file is shell code, so a value that needed
+# quoting makes the shell name the offending word: an unquoted multi-line password yields
+# "line2: command not found", which echoes part of that password -- and this script's stderr reaches
+# the caller's exception message and event log. The redaction further down covers gvm-cli's output,
+# not the shell's. An operator debugging this file is root here and can run `sh -n` on it directly.
 # shellcheck disable=SC1090
-. "$GMP_ENV"
+if ! . "$GMP_ENV" 2>/dev/null; then
+    die "failed to source $GMP_ENV -- check it with: sh -n $GMP_ENV. Quote any value containing a space, %, # or other shell metacharacter. Its contents are deliberately not echoed."
+fi
 
 # Defaults applied only now, so they come from .gmp.env or from here -- never from the caller.
 COMPOSE_DIR="${COMPOSE_DIR:-/opt/greenbone-community-edition}"
