@@ -29,10 +29,22 @@
     # -Command, NOT -File: with -File, everything after the script path is passed to the script as
     # arguments and '*>' is never parsed as redirection, so the task fails every single run. For the
     # backstop that means the one mitigation covering kill/reboot would never actually fire.
+    #
+    # The try/catch and the explicit re-exit are load-bearing for exactly the reason this script
+    # exists. powershell.exe -Command does not propagate a called script's exit code -- MEASURED on
+    # Windows PowerShell 5.1:
+    #     -Command "& 'x.ps1' *> 'log'"           exit 3 arrives as 1
+    #     -Command "& { & 'x.ps1' } *> 'log'"     exit 3 arrives as 0, and so does a MISSING script
+    # Without this, the codes documented above collapse to 0/1, and a backstop whose path is wrong
+    # -- or whose file AllSigned refuses -- reports SUCCESS every week while never revoking anything.
+    # 'exit $LASTEXITCODE' recovers the code; only the catch covers "the script never ran at all",
+    # because $LASTEXITCODE is left untouched in that case.
+    $inner = "& 'C:\GvmJit\examples\backstop-task.ps1' -ConfigPath 'C:\GvmJit\config.psd1' " +
+             "*> 'C:\GvmJit\backstop-last-run.log'"
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-        '-NoProfile -ExecutionPolicy AllSigned -Command ' +
-        '"& ''C:\GvmJit\examples\backstop-task.ps1'' -ConfigPath ''C:\GvmJit\config.psd1'' ' +
-        '*> ''C:\GvmJit\backstop-last-run.log''"')
+        '-NoProfile -NonInteractive -ExecutionPolicy AllSigned -Command ' +
+        "`"`$ErrorActionPreference='Stop'; try { $inner; exit `$LASTEXITCODE } " +
+        "catch { `$_ | Out-File 'C:\GvmJit\backstop-last-run.log' -Append; exit 1 }`"")
     Register-ScheduledTask -TaskName 'GVM JIT credential backstop' -Action $action `
         -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 10:30) `
         -Principal (New-ScheduledTaskPrincipal -UserId 'EXAMPLE\gvm-runner$' -LogonType Password -RunLevel Limited) `

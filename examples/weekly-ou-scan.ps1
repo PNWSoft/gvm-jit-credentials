@@ -222,6 +222,9 @@ if ($state) {
 $stamp = '{0:yyyyMMdd-HHmmss}' -f (Get-Date)
 $script:taskId = ''
 $script:targetId = if ($script:reuseTargetId) { $script:reuseTargetId } else { '' }
+# Declared here, not only assigned inside the ScanAction: under Set-StrictMode -Version Latest,
+# reading it afterwards would throw if the block never reached the assignment.
+$script:scanStatus = ''
 
 $result = Invoke-GvmJitScan -Identity $Identity -CredentialId $CredentialId `
     -ScannerHost $ScannerHost -GmpHelper $GmpHelper -IdentityFile $IdentityFile `
@@ -268,6 +271,10 @@ $result = Invoke-GvmJitScan -Identity $Identity -CredentialId $CredentialId `
             $status = if ($node) { $node.InnerText } else { 'Unknown' }
         } until ($terminal -contains $status)
 
+        # Surfaced to the caller the same way $script:taskId is. Without this the terminal status
+        # stayed inside this script block and the script exited 0 for a Stopped or Interrupted scan,
+        # which are in $terminal precisely because they end the wait -- not because they are success.
+        $script:scanStatus = $status
         Write-Host "  scan reached terminal state: $status"
     }
 
@@ -303,9 +310,22 @@ if ($StateFile -and $script:taskId) {
 }
 if ($result.Revoke.Warnings.Count -gt 0) { $result.Revoke.Warnings | ForEach-Object { Write-Warning $_ } }
 
-# Exit codes the scheduled task can act on.
+# Exit codes the scheduled task can act on. Same 0/1/2/3 meanings as scan-task.ps1, checked in order
+# of severity because a run can qualify for more than one and the scheduler shows only one number.
+#
+# Registering this task: powershell.exe -Command does NOT propagate a script's exit code, so wrap the
+# call as scan-task.ps1's help shows -- "try { & 'script' ... *> 'log'; exit $LASTEXITCODE } catch
+# { ...; exit 1 }". Without that, everything below arrives as 0 or 1, and the '& { ... } *> log' form
+# reports 0 even when this script is missing entirely.
 if ($result.Revoke.Errors.Count -gt 0) {
-    $result.Revoke.Errors | ForEach-Object { Write-Error $_ }
+    # -ErrorAction Continue is required: this script sets $ErrorActionPreference = 'Stop', under which
+    # Write-Error TERMINATES, so the script died here and exited 1 and the 'exit 2' was unreachable.
+    $result.Revoke.Errors | ForEach-Object { Write-Error $_ -ErrorAction Continue }
     exit 2      # the credential did not fully revoke: investigate immediately
 }
+if ($script:scanStatus -ne 'Done') {
+    Write-Warning "Scan ended as '$($script:scanStatus)', not 'Done'."
+    exit 1      # credential revoked; it is the scan that did not complete
+}
+if ($result.Revoke.Warnings.Count -gt 0) { exit 3 }   # revoked, but the scanner's copy is stale
 exit 0

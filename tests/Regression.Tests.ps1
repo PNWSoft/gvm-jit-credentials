@@ -427,3 +427,58 @@ Export-ModuleMember -Function Revoke-GvmScanCredential, Invoke-GvmJitScan
         script:Invoke-EntryScript -Script 'scan-task.ps1' -ModulePath $m | Should -Be 2
     }
 }
+
+Describe 'Write-Error cannot be used as a report-then-exit in a Stop-preference script' {
+    # The bug class, not one instance of it. All three entry points set $ErrorActionPreference =
+    # 'Stop', under which Write-Error is TERMINATING -- so "report the errors, then exit 2" never
+    # reached its exit, and the most serious outcome each script has arrived as a plain 1. It was
+    # present in scan-task.ps1 and weekly-ou-scan.ps1 simultaneously, which is why this is asserted
+    # over every entry point by AST rather than fixed twice and trusted.
+
+    BeforeDiscovery {
+        $script:entryPoints = Get-ChildItem (Join-Path (Split-Path $PSScriptRoot -Parent) 'examples') -Filter *.ps1 |
+            ForEach-Object { @{ Name = $_.Name; Path = $_.FullName } }
+    }
+
+    It 'every Write-Error in <Name> passes -ErrorAction explicitly, if the script sets Stop' -ForEach $script:entryPoints {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+
+        $setsStop = $ast.FindAll({
+                param($n)
+                $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $n.Left.Extent.Text -eq '$ErrorActionPreference' -and $n.Right.Extent.Text -match "'Stop'"
+            }, $true).Count -gt 0
+
+        if (-not $setsStop) { Set-ItResult -Skipped -Because 'this script does not set $ErrorActionPreference to Stop'; return }
+
+        $writeErrors = $ast.FindAll({
+                param($n)
+                $n -is [System.Management.Automation.Language.CommandAst] -and
+                $n.GetCommandName() -eq 'Write-Error'
+            }, $true)
+
+        foreach ($we in $writeErrors) {
+            $txt = $we.Extent.Text
+            # Terminating here would skip whatever exit follows, so the intent must be stated.
+            $txt | Should -Match '-ErrorAction' -Because `
+                "Write-Error terminates under `$ErrorActionPreference='Stop', skipping the exit that follows it: $txt"
+        }
+    }
+}
+
+Describe 'Task registration examples survive powershell.exe -Command' {
+    # MEASURED on Windows PowerShell 5.1: -Command does not propagate a called script's exit code.
+    #   "& 'x.ps1' *> 'log'"        exit 3 -> 1
+    #   "& { & 'x.ps1' } *> 'log'"  exit 3 -> 0, and a MISSING script -> 0 as well
+    # The documented codes are worthless if the copy-pasteable registration example throws them away,
+    # and the missing-script case makes a silently broken backstop look green forever.
+
+    It 'the <Name> registration example re-exits $LASTEXITCODE and catches a script that never ran' -ForEach @(
+        @{ Name = 'scan-task.ps1' }, @{ Name = 'backstop-task.ps1' }
+    ) {
+        $text = Get-Content (Join-Path (Split-Path $PSScriptRoot -Parent) "examples\$Name") -Raw
+        $help = $text.Substring(0, $text.IndexOf('#>'))
+        $help | Should -Match 'exit \$LASTEXITCODE' -Because 'otherwise every documented exit code collapses to 0 or 1'
+        $help | Should -Match 'catch' -Because 'a missing or AllSigned-refused script otherwise reports success'
+    }
+}

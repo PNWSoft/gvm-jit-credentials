@@ -14,10 +14,21 @@
     # -Command, NOT -File. With -File, everything after the script path is passed to the script
     # as arguments and '*>' is never parsed as redirection: the task fails with
     # "A positional parameter cannot be found that accepts argument '*>'" and writes no log.
+    #
+    # The try/catch and the explicit re-exit are NOT boilerplate. powershell.exe -Command does not
+    # propagate a called script's exit code -- MEASURED on Windows PowerShell 5.1:
+    #     -Command "& 'x.ps1' *> 'log'"           exit 3 arrives as 1
+    #     -Command "& { & 'x.ps1' } *> 'log'"     exit 3 arrives as 0, and so does a MISSING script
+    # So every exit code below collapses to 0/1, and the worst case -- a wrong path, or AllSigned
+    # refusing the file -- reports SUCCESS. 'exit $LASTEXITCODE' fixes the first; only the catch
+    # fixes the second, because $LASTEXITCODE is untouched when the script never ran at all. Use
+    # -File instead if you do not need the redirection: it propagates exit codes on its own.
+    $inner = "& 'C:\GvmJit\examples\scan-task.ps1' -ConfigPath 'C:\GvmJit\config.psd1' " +
+             "*> 'C:\GvmJit\scan-last-run.log'"
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-        '-NoProfile -ExecutionPolicy AllSigned -Command ' +
-        '"& ''C:\GvmJit\examples\scan-task.ps1'' -ConfigPath ''C:\GvmJit\config.psd1'' ' +
-        '*> ''C:\GvmJit\scan-last-run.log''"')
+        '-NoProfile -NonInteractive -ExecutionPolicy AllSigned -Command ' +
+        "`"`$ErrorActionPreference='Stop'; try { $inner; exit `$LASTEXITCODE } " +
+        "catch { `$_ | Out-File 'C:\GvmJit\scan-last-run.log' -Append; exit 1 }`"")
     Register-ScheduledTask -TaskName 'GVM JIT scan' -Action $action `
         -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 01:00) `
         -Principal (New-ScheduledTaskPrincipal -UserId 'EXAMPLE\gvm-runner$' -LogonType Password -RunLevel Limited)
