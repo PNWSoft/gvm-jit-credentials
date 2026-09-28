@@ -323,9 +323,10 @@ claim support for a configuration you haven't run.
 
 # 4. Decide how the account gets access on targets — your call.
 #    examples\Add-ScanAccountLocalAdmin.ps1 shows one approach among several.
-#    Then deny it every logon type a scan does not use. A GPO on the target OUs is the scalable way;
-#    examples\Set-ScanAccountLogonRights.ps1 does one machine at a time. Do NOT point that at the
-#    runner: a scheduled task logs on as batch, so denying that right stops the scan starting.
+#    Then deny it every logon type a scan does not use. examples\New-ScanAccountLogonRightsGpo.ps1
+#    builds the GPO for that (created unlinked; link it when you are ready), and
+#    examples\Set-ScanAccountLogonRights.ps1 does one machine at a time. Do NOT point either at
+#    the runner: a scheduled task logs on as batch, so denying that right stops the scan starting.
 
 # 5. Register the scan task AND the backstop task — see examples\
 ```
@@ -341,8 +342,8 @@ Two things the scripts cannot do for you:
   where *it* runs, which may not be the runner. If it is missing, the audit trail goes to the task
   log only — you get one warning saying so, rather than silence.
 
-The bootstrap scripts, `weekly-ou-scan.ps1` and `Set-ScanAccountLogonRights.ps1` support `-WhatIf`. Use
-it first. The scheduled-task entry points (`scan-task.ps1`, `backstop-task.ps1`) do not, because they
+The bootstrap scripts, `weekly-ou-scan.ps1`, `Set-ScanAccountLogonRights.ps1` and
+`New-ScanAccountLogonRightsGpo.ps1` support `-WhatIf`. Use it first. The scheduled-task entry points (`scan-task.ps1`, `backstop-task.ps1`) do not, because they
 delegate to functions that implement it; `Test-ScanAccountLogons.ps1` does not, because it only reads.
 
 ## Gotchas that will cost you an afternoon
@@ -420,6 +421,13 @@ the scan merely finishing.
 What the suite does **not** cover: there are no tests for the shell in `host/`, and the entry points'
 `exit 2` for a failed grant rollback is asserted at the module level rather than through a child
 process. The rest of the exit-code contract runs as a real child process against a stub module.
+
+`New-ScanAccountLogonRightsGpo.ps1` is the one script here whose write path has not been run: creating a
+GPO, writing its security template and bumping its version needs domain-level rights and would leave a
+real GPO behind. What *was* verified against a live domain is its read path and that its merge is
+idempotent -- pointed at an existing GPO it correctly reports nothing to change -- plus its template
+merge, version arithmetic and file encoding, each checked against the template of a GPO known to work.
+Treat the write path as reviewed rather than proven, and run it with `-WhatIf` first.
 
 That is not a claim of correctness — it is a statement that nothing here is untried, which for this
 kind of tool is the minimum bar. It supports one configuration for the same reason.
