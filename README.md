@@ -6,9 +6,9 @@ Just-in-time credentials for authenticated Greenbone / OpenVAS scans.
 
 The scan account is **disabled**, with a password nobody holds, except during a scan. For the scan
 window it is enabled and its password rotated to a fresh random value; afterwards both are undone.
-The goal is narrow and worth stating plainly: to make that account **useless outside the scan
-window**, so that a stolen credential authenticates nowhere — then or later, because the next window
-uses a fresh value, not this one — and so that any attempt to use it is unambiguous.
+The goal is narrow: to make that account **useless outside the scan window**, so that a stolen 
+credential authenticates nowhere — then or later, because the next window uses a fresh value, not 
+this one — and so that any attempt to use it is unambiguous.
 
 ```powershell
 $grant = Grant-GvmScanCredential -Identity gvm-scan -CredentialId $cfg.CredentialId `
@@ -27,17 +27,25 @@ between scans — which is most of the time — there is a domain account with l
 estate, whose password sits in a database on an appliance, and which nothing is watching because it
 is *supposed* to be there.
 
-The obvious Windows answer is a group-managed service account: let AD own the password so no human or
-database holds a standing secret. A gMSA does not solve this particular problem, though not for the
-reason usually given — an authorised principal *can* retrieve `msDS-ManagedPassword`, so the runner
-could fetch it and hand it to Greenbone. The problem is what happens next: Greenbone stores that
-password, and a gMSA password stays valid for about 30 days, so you are back to a standing credential
-in the scanner database — the thing you were trying to avoid. You could disable the gMSA between scans
-(`Set-ADServiceAccount -Enabled $false`), but then you are doing this module's job by hand and getting
-none of the benefit of AD-managed rotation.
+A group-managed service account is the other way to approach this, and a reasonable one. What follows is
+not an argument that gMSAs are wrong — it is an argument that one buys little *here*.
 
-This reaches the same goal by other means: disable the account and rotate the password around each
-scan, rather than delegating password management to AD.
+To use a gMSA, the runner has to read `msDS-ManagedPassword` and hand the value to Greenbone. A
+principal authorised to retrieve it can do that, but arranging and holding that authorisation is its own
+piece of work, and at the end of it Greenbone is still storing the password. The properties you arrive
+at are close to what this produces, with one difference that decides it for this use case: AD rotates a
+gMSA password on its own interval (30 days by default), not on demand — so there is no way to make the
+copy in the scanner database stale at the end of each scan. Being able to do exactly that is the
+mechanism this relies on.
+
+So the SCAN account used here is an ordinary one, deliberately shaped like a service identity: created
+disabled, unable to change its own password, and with a password no human ever holds. What a gMSA would
+manage on a schedule of its own is done explicitly instead, on the schedule the scan actually runs on.
+Denying it interactive logon rights by GPO is a sensible addition, and one these scripts leave to you.
+
+The RUNNER account, by contrast, is a gMSA in this deployment and in the examples — that is precisely
+where one fits, because its password is never handed to anything. The distinction is not gMSA versus
+ordinary account; it is whether the password has to leave AD.
 
 It reduces *when* the account can be used. It does not reduce what the account can do while a scan is
 running.
