@@ -112,7 +112,9 @@ if (-not $Force) {
     # comparison would equal the DOMAIN SID and refuse every legitimate domain account.
     $localDomainSid = $null
     $isDc = $false
-    try { $isDc = ((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).DomainRole -ge 4) }
+    # -OperationTimeoutSec so a wedged WMI repository becomes the warn-and-skip path below rather than a
+    # script that hangs before doing anything. The guard degrades on error; it must degrade on silence too.
+    try { $isDc = ((Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 15 -ErrorAction Stop).DomainRole -ge 4) }
     catch {
         # Not fatal: $isDc stays false, and the local-account check below either answers or warns. It is
         # reported at Verbose rather than as a warning because a member server -- the normal case -- is
@@ -121,8 +123,10 @@ if (-not $Force) {
     }
     if (-not $isDc) {
         try {
-            $anyLocal = Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True' -ErrorAction Stop |
-                        Select-Object -First 1
+            # The LocalAccount=True filter is what keeps this off the domain-wide enumeration that makes
+            # an unfiltered Win32_UserAccount query notorious for hanging on a domain member.
+            $anyLocal = Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True' `
+                            -OperationTimeoutSec 15 -ErrorAction Stop | Select-Object -First 1
             if ($anyLocal) {
                 $localDomainSid = ([Security.Principal.SecurityIdentifier]$anyLocal.SID).AccountDomainSid.Value
             }
