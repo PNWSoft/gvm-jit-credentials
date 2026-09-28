@@ -317,8 +317,20 @@ AD or GMP directly instead of through those seams, it becomes untestable — ple
 Extracted from a working deployment, then run against it. As of 0.1.0 every script here had been
 executed against a live Greenbone 22.7 instance and a multi-DC Active Directory domain: the full
 grant/scan/revoke lifecycle, task reuse and its refusal path, the AD delegation, the scanner relay
-under load, and the backstop's failure path including a deliberately failing revoke. The 60-case test
+under load, and the backstop's failure path including a deliberately failing revoke. The 75-case test
 suite needs neither.
+
+The three scheduled-task entry points were re-verified as a signed deployment, run by the runner gMSA
+under `-ExecutionPolicy AllSigned`, with every documented exit code observed rather than inferred: a
+clean revoke (0), a revoke whose scanner-side overwrite failed while the AD side succeeded (3), a
+revoke against a nonexistent account (1), the fast scan path (0), and `weekly-ou-scan.ps1` building a
+target and task and then reusing both on a second run (0). Authentication was confirmed from the scan
+report itself — `login/SMB/success: TRUE` — rather than from the scan merely finishing.
+
+Three defects were reachable only that way, and are worth knowing about if you adapt this: a partial
+revoke that reported success, an exit code made unreachable by `Write-Error` under
+`$ErrorActionPreference = 'Stop'`, and a registration example whose `-Command` wrapper discarded every
+exit code documented here. Each has a test, and each test was confirmed to fail with its fix reverted.
 
 That is not a claim of correctness — it is a statement that nothing here is untried, which for this
 kind of tool is the minimum bar. It supports one configuration for the same reason.
