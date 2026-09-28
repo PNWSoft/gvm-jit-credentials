@@ -6,8 +6,8 @@ Just-in-time credentials for authenticated Greenbone / OpenVAS scans.
 
 The scan account is **disabled**, with a password nobody holds, except during a scan. For the scan
 window it is enabled and its password rotated to a fresh random value; afterwards both are undone.
-The goal is narrow: to make that account **useless outside the scan window**, so that a stolen 
-credential authenticates nowhere — then or later, because the next window uses a fresh value, not 
+The goal is narrow: to make that account **useless outside the scan window**, so that a stolen
+credential authenticates nowhere — then or later, because the next window uses a fresh value, not
 this one — and so that any attempt to use it is unambiguous.
 
 ```powershell
@@ -42,6 +42,13 @@ So the SCAN account used here is an ordinary one, deliberately shaped like a ser
 disabled, unable to change its own password, marked *sensitive and cannot be delegated*, and with a
 password no human ever holds. What a gMSA would manage on a schedule of its own is done explicitly
 instead, on the schedule the scan actually runs on.
+
+Being clear about that last flag rather than overselling it: it stops any Kerberos ticket for the account
+being forwarded by a service it authenticates to. The scan's own logon does not involve one — the
+credential this creates is Greenbone's `up` type, which it labels SMB (NTLM) — so the flag is invisible
+to the scan itself. It is set because it is free, because an account with local admin everywhere should
+not be delegatable, and because it is correct for any other use of the account. The NTLM analogue,
+relay during the scan window, is a separate problem it does not address.
 
 Blocking interactive logon is worth adding and these scripts leave it to you, because the safe mechanism
 is a GPO across the estate rather than an attribute on one object. Use the **Deny log on locally** and

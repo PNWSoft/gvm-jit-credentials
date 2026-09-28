@@ -114,7 +114,8 @@ function Invoke-GmpRequest {
         $stderr = [regex]::Replace($stderr.Trim(), '(?is)[^<>]*</password>', '[redacted]</password>')
 
         # An UNTERMINATED element -- no close at all, or a malformed one like </passwor> -- has no
-        # </password> for the rule above to anchor on, so it is handled by position rather than by pattern: anything that opens a
+        # </password> for the rule above to anchor on, so it is handled by position rather than by
+        # pattern: anything that opens a
         # password element after the last real close is redacted through to the end of the string. Done
         # with IndexOf, not a lookahead regex, because the obvious `(?:(?!</password>).)*` form is
         # itself backtracking-prone on exactly the input this is meant to survive. Costs the trailing

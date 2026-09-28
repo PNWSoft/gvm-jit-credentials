@@ -618,7 +618,14 @@ Describe 'Relayed stderr cannot carry a password into the exception message' {
         $env:GVMJIT_TEST_STDERR_BODY = $Body
         InModuleScope GvmJitCredential {
             Mock Write-JitLog {}
-            Mock Test-Path { $true }
+            # Answers per path rather than always $true. Invoke-GmpRequest guards its $LASTEXITCODE read
+            # with Test-Path 'Variable:LASTEXITCODE', because StrictMode throws on an unset variable. A
+            # blanket $true bypasses that guard and the function then throws -- these tests passed only
+            # because earlier ones had run a real native command and happened to set the variable, so this
+            # Describe failed 3/3 when run alone. Returning $false for the Variable: provider makes the
+            # guarded path deterministic and independent of run order. A -ParameterFilter is the wrong tool
+            # here: Pester 6 errors when a filter excludes a call and no default mock remains.
+            Mock Test-Path { $LiteralPath -notlike 'Variable:*' }
             Mock Remove-Item {}
             # stderr echoing the request with no stdout: the gvm-tools parse-error shape.
             Mock Get-Content { "gmp-relay.sh: gvm-cli exit 1: Invalid XML '<modify_credential>$($env:GVMJIT_TEST_STDERR_BODY)'. Error was Premature end of data" }
@@ -651,7 +658,14 @@ Describe 'Relayed stderr cannot carry a password into the exception message' {
         $env:GVMJIT_TEST_STDERR_BODY = $Text
         InModuleScope GvmJitCredential {
             Mock Write-JitLog {}
-            Mock Test-Path { $true }
+            # Answers per path rather than always $true. Invoke-GmpRequest guards its $LASTEXITCODE read
+            # with Test-Path 'Variable:LASTEXITCODE', because StrictMode throws on an unset variable. A
+            # blanket $true bypasses that guard and the function then throws -- these tests passed only
+            # because earlier ones had run a real native command and happened to set the variable, so this
+            # Describe failed 3/3 when run alone. Returning $false for the Variable: provider makes the
+            # guarded path deterministic and independent of run order. A -ParameterFilter is the wrong tool
+            # here: Pester 6 errors when a filter excludes a call and no default mock remains.
+            Mock Test-Path { $LiteralPath -notlike 'Variable:*' }
             Mock Remove-Item {}
             Mock Get-Content { $env:GVMJIT_TEST_STDERR_BODY }
             # ssh is invoked directly, so it is the seam: mock it to produce a SUCCESSFUL response while
@@ -666,7 +680,14 @@ Describe 'Relayed stderr cannot carry a password into the exception message' {
     It 'is idempotent: redacting already-redacted text changes nothing and re-exposes nothing' {
         InModuleScope GvmJitCredential {
             Mock Write-JitLog {}
-            Mock Test-Path { $true }
+            # Answers per path rather than always $true. Invoke-GmpRequest guards its $LASTEXITCODE read
+            # with Test-Path 'Variable:LASTEXITCODE', because StrictMode throws on an unset variable. A
+            # blanket $true bypasses that guard and the function then throws -- these tests passed only
+            # because earlier ones had run a real native command and happened to set the variable, so this
+            # Describe failed 3/3 when run alone. Returning $false for the Variable: provider makes the
+            # guarded path deterministic and independent of run order. A -ParameterFilter is the wrong tool
+            # here: Pester 6 errors when a filter excludes a call and no default mock remains.
+            Mock Test-Path { $LiteralPath -notlike 'Variable:*' }
             Mock Remove-Item {}
             # Feed back the exact shape a previous pass produces.
             Mock Get-Content { "gmp-relay.sh: gvm-cli exit 1: Invalid XML '<modify_credential><password>[redacted]</password>'. Error was Premature end of data" }

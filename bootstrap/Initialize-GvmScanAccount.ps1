@@ -65,14 +65,19 @@ elseif ($PSCmdlet.ShouldProcess($Identity, 'Create disabled AD scan account')) {
     $module = Get-Module GvmJitCredential
     $initial = & $module { New-EphemeralPassword -Length 32 }
     # -AccountNotDelegated sets "Account is sensitive and cannot be delegated" (the NOT_DELEGATED bit in
-    # userAccountControl). This account holds local administrator on every target, so its Kerberos
-    # ticket must not be forwardable by a service it authenticates to -- otherwise compromising any one
-    # of those services lets an attacker impersonate it onward to the rest. It costs nothing here,
-    # because nothing legitimately delegates on this account's behalf.
+    # userAccountControl), so the account's Kerberos ticket cannot be forwarded by a service it
+    # authenticates to. Note what that does and does not buy here: the Greenbone credential this project
+    # creates is type 'up', which Greenbone labels SMB (NTLM), so the scan's own logon involves no
+    # Kerberos ticket at all and this flag is invisible to it. It is set because it is free and correct
+    # for any OTHER use of the account, and because an account with local admin everywhere should not be
+    # delegatable. The NTLM analogue -- relay during the scan window -- is a different problem that this
+    # flag does not address; see the threat model in the README.
     #
-    # NOTE: do not put a comment between these backtick-continued lines. It parses, and then silently
-    # ENDS the command -- every parameter after the comment is dropped, which the CI parse gate cannot
-    # see. That is how this very parameter, and -Description, went missing once.
+    # NOTE: do not put a comment between these backtick-continued lines. It PARSES, so the CI parse gate
+    # cannot see it, and the command then runs with only the parameters ABOVE the comment; the ones below
+    # fail afterwards as a bogus command. Here that is worse than it sounds: New-ADUser has already
+    # created the account without them, the script stops, and a re-run takes the "already exists" branch
+    # and never revisits them. That is how this parameter and -Description went missing once.
     New-ADUser -Name $Identity -SamAccountName $Identity -DisplayName $DisplayName `
         -Path $Path -Server $pdc `
         -AccountPassword (ConvertTo-SecureString $initial -AsPlainText -Force) `
@@ -86,8 +91,8 @@ elseif ($PSCmdlet.ShouldProcess($Identity, 'Create disabled AD scan account')) {
     Write-Host "  created '$Identity' (DISABLED)" -ForegroundColor Green
     Write-Host '  -CannotChangePassword does not block rotation: that flag stops the USER changing' -ForegroundColor DarkGray
     Write-Host '  their own password; the module uses an administrative reset, which is unaffected.' -ForegroundColor DarkGray
-    Write-Host '  marked sensitive and cannot be delegated, so its ticket is not forwardable by a' -ForegroundColor DarkGray
-    Write-Host '  service it authenticates to.' -ForegroundColor DarkGray
+    Write-Host '  marked sensitive and cannot be delegated, so no Kerberos ticket for it is forwardable.' -ForegroundColor DarkGray
+    Write-Host '  The scan itself authenticates over SMB with NTLM, where that flag does not apply.' -ForegroundColor DarkGray
 }
 else { return }
 
