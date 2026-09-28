@@ -103,10 +103,45 @@ jobs:
 
       - name: No environment-specific values committed
         run: |
-          # The ':!' pathspec excludes this workflow from its own search: it necessarily
-          # contains the patterns it looks for and would fail every run otherwise.
-          if git grep -inE 'REDACTED-ADDRESSES|REDACTED-HOST|REDACTED-ACCOUNT|REDACTED-USER' -- \
-               '*.ps1' '*.psm1' '*.psd1' '*.sh' '*.md' '*.yml' ':!.github/workflows/ci.yml'; then
-            echo 'Environment-specific values must not be committed'; exit 1
+          # Patterns are deliberately GENERIC. An earlier version of this gate listed the maintainer's
+          # actual addresses, hostname and account names inline, and excluded itself from its own search
+          # so it would not fail -- which meant the control against publishing those values published
+          # them. A leak gate must not be a leak.
+          #
+          # The documented examples this repo DOES use are allowed by name: the 10.0.0.x subnet, the
+          # EXAMPLE/example.local domain, and scanner.example.local. Anything else that looks like a real
+          # environment fails, which is the right default for a public sample.
+          FILES="*.ps1 *.psm1 *.psd1 *.sh *.md *.yml"
+          bad=0
+
+          # RFC1918 addresses other than the 10.0.0.x used in the examples.
+          if git grep -inE '(192\.168\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+|10\.(([1-9][0-9]*\.)|0\.([1-9][0-9]*\.)))' -- $FILES; then
+            echo '^ private IP address that is not the documented 10.0.0.x example'; bad=1
           fi
+
+          # An AD domain component that is not the example one. Filtered with a second grep rather than a
+          # negative lookahead, so this does not depend on git being built with PCRE -- and matched per
+          # TOKEN, not per line, because a real domain written beside the allowed one (as in
+          # "DC=<yours>,DC=local") sits on a line that contains an allowed token, and filtering whole
+          # lines would let it through. Verified against exactly that input.
+          #
+          # This step scans '*.yml', so it scans ITSELF. That is deliberate -- it is what stops a real
+          # value being parked in the gate's own patterns -- and it is why nothing here spells out a
+          # concrete domain, address or account name, not even in a comment.
+          offenders=$(git grep -ohE 'DC=[A-Za-z0-9-]+' -- $FILES | sort -u | grep -viE '^DC=(EXAMPLE|local)$' || true)
+          if [ -n "$offenders" ]; then
+            echo "AD domain other than EXAMPLE: $offenders"
+            for t in $offenders; do git grep -inF "$t" -- $FILES || true; done
+            bad=1
+          fi
+
+          # Optional: the maintainer's own values, supplied as a repo secret so they are checked without
+          # being committed. Absent (forks, first clone) the generic checks above still apply.
+          if [ -n "${{ secrets.FORBIDDEN_VALUE_PATTERN }}" ]; then
+            if git grep -inE "${{ secrets.FORBIDDEN_VALUE_PATTERN }}" -- $FILES; then
+              echo '^ matches the private forbidden-value pattern'; bad=1
+            fi
+          fi
+
+          [ "$bad" -eq 0 ] || { echo 'Environment-specific values must not be committed'; exit 1; }
           echo 'clean'
