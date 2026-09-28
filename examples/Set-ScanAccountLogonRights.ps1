@@ -56,6 +56,11 @@
 param(
     [Parameter(Mandatory)][string]$Identity,
     [switch]$Force,
+    # Validated, not just defaulted. These names are interpolated into a regex that finds the line to
+    # edit, so a stray space ('SeDenyNetworkLogonRight ') would slip past the -contains refusal below
+    # while still matching -- and writing -- the one right that must never be denied. secedit applies it
+    # before the verification pass notices, and nothing rolls that back.
+    [ValidatePattern('^Se[A-Za-z]+(Right|Privilege)$')]
     [string[]]$DenyRight = @(
         'SeDenyInteractiveLogonRight',        # Deny log on locally
         'SeDenyRemoteInteractiveLogonRight',  # Deny log on through Remote Desktop Services
@@ -78,31 +83,54 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     throw 'Run this elevated: editing local security policy needs administrator.'
 }
 
-$sid = (New-Object Security.Principal.NTAccount($Identity)).Translate(
-            [Security.Principal.SecurityIdentifier]).Value
+$sidObj = (New-Object Security.Principal.NTAccount($Identity)).Translate(
+            [Security.Principal.SecurityIdentifier])
+$sid = $sidObj.Value
 Write-Host "$Identity resolves to $sid"
 
 if (-not $Force) {
     # 'Everyone' (S-1-1-0), 'BUILTIN\Administrators' (S-1-5-32-544) and 'Authenticated Users' (S-1-5-11)
     # all translate perfectly well from a name. Denying them these rights would lock this machine's
-    # administrators out of it. Domain SIDs only.
+    # administrators out of it.
     if ($sid -notmatch '^S-1-5-21-') {
         throw "$Identity resolves to the well-known SID $sid, not a domain account. Refusing (-Force overrides)."
     }
-    # Best effort, and only best effort: this script must still work on a host that cannot reach a DC at
-    # this moment. The prefix test above already covers the dangerous well-known SIDs; this catches a
-    # domain GROUP or a managed service account, which the prefix test cannot.
-    try {
-        $cls = ([ADSI]"LDAP://<SID=$sid>").SchemaClassName
-        if ($cls -and $cls -ne 'user') {
-            throw ("$Identity is a '$cls', not a user. Denying these rights to a group or managed " +
-                   'service account has a blast radius nobody intends -- and a gMSA is normally the ' +
-                   'RUNNER, which needs batch logon. Refusing (-Force overrides).')
-        }
-        Write-Host '  confirmed: a domain user object'
+
+    # The prefix test above does NOT mean "a domain account". A LOCAL account has an S-1-5-21-<machine>
+    # SID too, so '.\Administrator' or 'THISHOST\Administrator' sails through it -- measured, not
+    # assumed. Denying interactive and RDP logon to this machine's own Administrator is the single worst
+    # outcome this script can produce, so compare against the machine's own account domain.
+    $localDomainSid = (New-Object Security.Principal.NTAccount(
+                          "$env:COMPUTERNAME\Administrator")).Translate(
+                          [Security.Principal.SecurityIdentifier]).AccountDomainSid.Value
+    if ($sidObj.AccountDomainSid.Value -eq $localDomainSid) {
+        throw ("$Identity is a LOCAL account on this machine ($sid), not a domain account. Denying it " +
+               'these rights can lock this host out of its own administration. Refusing (-Force overrides).')
     }
-    catch [System.Management.Automation.RuntimeException] { throw }
-    catch { Write-Warning "  could not confirm the object class ($($_.Exception.Message)); continuing on the SID prefix alone" }
+    if ($sid -match '-500$') {
+        throw "$Identity is a built-in Administrator account (RID 500). Refusing (-Force overrides)."
+    }
+
+    # Best effort, and only best effort: this script must still work on a host that cannot reach a DC at
+    # this moment. It catches a domain GROUP or a managed service account, which no SID test can.
+    #
+    # The three outcomes are kept distinct deliberately. A serverless LDAP bind that cannot reach a DC
+    # returns an EMPTY SchemaClassName rather than throwing -- measured -- so folding "unknown" in with
+    # "confirmed" would print 'confirmed: a domain user object' about an object nobody looked at, and the
+    # catch below would be dead code.
+    $cls = ''
+    try { $cls = [string]([ADSI]"LDAP://<SID=$sid>").SchemaClassName }
+    catch { Write-Warning "  could not query the object class: $($_.Exception.Message)" }
+
+    if ($cls -eq 'user') { Write-Host '  confirmed: a domain user object' }
+    elseif (-not $cls) {
+        Write-Warning '  could not confirm the object class (no answer from a DC); continuing on the SID alone'
+    }
+    else {
+        throw ("$Identity is a '$cls', not a user. Denying these rights to a group or managed " +
+               'service account has a blast radius nobody intends -- and a gMSA is normally the ' +
+               'RUNNER, which needs batch logon. Refusing (-Force overrides).')
+    }
 }
 
 function Add-PrivilegeRightMember {
@@ -121,13 +149,15 @@ function Add-PrivilegeRightMember {
         [Parameter(Mandatory)][string]$Sid
     )
     for ($i = 0; $i -lt $Lines.Count; $i++) {
-        if ($Lines[$i] -match "^\s*$Right\s*=\s*(.*)$") {
+        if ($Lines[$i] -match "^\s*$([regex]::Escape($Right))\s*=\s*(.*)$") {
             $members = $Matches[1].Trim()
-            $have = @($members -split ',' | ForEach-Object { $_.Trim().TrimStart('*') })
-            if ($have -contains $Sid) { return 'present' }
+            # Empty entries dropped before rebuilding, so a right present with no members
+            # ('SeDenyBatchLogonRight = ') does not produce a leading comma that secedit may reject.
+            $have = @($members -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if (@($have | ForEach-Object { $_.TrimStart('*') }) -contains $Sid) { return 'present' }
             # Existing members are carried across: a template REPLACES the membership of any right it
             # names, so dropping them would silently revoke those holders.
-            $Lines[$i] = "$Right = $members,*$Sid"
+            $Lines[$i] = "$Right = " + (@($have + "*$Sid") -join ',')
             return 'appended'
         }
     }
@@ -163,7 +193,8 @@ try {
         $lines.Add($l)
     }
     foreach ($right in $DenyRight) {
-        $cur = @($exported) | Where-Object { $_ -match "^\s*$right\s*=" } | Select-Object -First 1
+        $rx = "^\s*$([regex]::Escape($right))\s*="
+        $cur = @($exported) | Where-Object { $_ -match $rx } | Select-Object -First 1
         if ($cur) { $lines.Add(($cur -replace '^\s+', '')) }
     }
 
@@ -207,9 +238,10 @@ try {
         Write-Host "`nVerification:"
         $bad = 0
         foreach ($right in $DenyRight) {
-            $line = $after | Where-Object { $_ -match "^\s*$right\s*=\s*(.*)$" } | Select-Object -First 1
+            $rx = "^\s*$([regex]::Escape($right))\s*=\s*(.*)$"
+            $line = $after | Where-Object { $_ -match $rx } | Select-Object -First 1
             $holds = $false
-            if ($line -and $line -match "^\s*$right\s*=\s*(.*)$") {
+            if ($line -and $line -match $rx) {
                 # Exact member comparison, for the same reason as the merge above.
                 $holds = @($Matches[1] -split ',' | ForEach-Object { $_.Trim().TrimStart('*') }) -contains $sid
             }

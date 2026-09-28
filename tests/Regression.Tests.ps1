@@ -760,3 +760,131 @@ Describe 'A failed Grant rollback reaches the scheduler, not just the event log'
         }
     }
 }
+
+Describe 'GPO report parsing survives StrictMode on GPOs that set no user rights' {
+    # This broke a release. The GPO example iterated a Get-GPOReport document with PowerShell's XML
+    # adapter ($e.Extension.UserRightsAssignment), which under Set-StrictMode THROWS
+    # PropertyNotFoundException for an absent child element rather than returning nothing. The
+    # verification path never hit it, because it only ever read a GPO the script had just authored --
+    # which always has a Security extension with user rights. The precedence-conflict check reads OTHER
+    # GPOs, and measured against a live domain a Registry-only GPO and the Default Domain Policy both
+    # threw, terminating the script after it had authored the GPO but before it could warn or link.
+    #
+    # The helper is extracted from the shipped file so this test cannot drift from the code.
+    BeforeAll {
+        $examples = Join-Path (Split-Path $PSScriptRoot -Parent) 'examples'
+        $text = Get-Content (Join-Path $examples 'New-ScanAccountLogonRightsGpo.ps1') -Raw
+        $m = [regex]::Match($text, "(?s)function Get-ReportUserRight \{.*?\n\}")
+        if (-not $m.Success) { throw 'could not extract Get-ReportUserRight from the shipped script' }
+        . ([scriptblock]::Create($m.Value))
+
+        # Namespace-PREFIXED, as real reports are: that is why GetElementsByTagName with a bare local
+        # name matches nothing, and why local-name() is used instead.
+        $script:ns = 'xmlns:q1="http://www.microsoft.com/GroupPolicy/Settings"'
+    }
+
+    It 'returns nothing, and does not throw, for <Name>' -ForEach @(
+        @{ Name = 'a Registry-only GPO'
+           Xml  = '<q1:GPO {NS}><q1:Computer><q1:ExtensionData><q1:Name>Registry</q1:Name><q1:Extension><q1:Policy><q1:Name>x</q1:Name></q1:Policy></q1:Extension></q1:ExtensionData></q1:Computer></q1:GPO>' }
+        @{ Name = 'a Security extension that sets no user rights'
+           Xml  = '<q1:GPO {NS}><q1:Computer><q1:ExtensionData><q1:Name>Security</q1:Name><q1:Extension><q1:Account><q1:Name>MinimumPasswordAge</q1:Name></q1:Account></q1:Extension></q1:ExtensionData></q1:Computer></q1:GPO>' }
+        @{ Name = 'a GPO with no computer side at all'
+           Xml  = '<q1:GPO {NS}><q1:User><q1:ExtensionData><q1:Name>Registry</q1:Name></q1:ExtensionData></q1:User></q1:GPO>' }
+    ) {
+        Set-StrictMode -Version Latest
+        $doc = [xml]($Xml -replace '\{NS\}', $script:ns)
+        { Get-ReportUserRight -Report $doc } | Should -Not -Throw
+        @(Get-ReportUserRight -Report $doc).Count | Should -Be 0
+    }
+
+    It 'reads the right name and every member SID without depending on .#text' {
+        Set-StrictMode -Version Latest
+        # Deliberately WITHOUT an xmlns attribute on <SID>. The adapter surfaces such an element as a
+        # bare String, and .'#text' on a String throws under StrictMode; InnerText does not.
+        $xml = '<q1:GPO ' + $script:ns + '><q1:Computer><q1:ExtensionData><q1:Name>Security</q1:Name>' +
+               '<q1:Extension><q1:UserRightsAssignment><q1:Name>SeDenyBatchLogonRight</q1:Name>' +
+               '<q1:Member><q1:SID>S-1-5-21-1-2-3-1105</q1:SID></q1:Member>' +
+               '<q1:Member><q1:SID>S-1-5-21-1-2-3-500</q1:SID></q1:Member>' +
+               '</q1:UserRightsAssignment></q1:Extension></q1:ExtensionData></q1:Computer></q1:GPO>'
+        $got = @(Get-ReportUserRight -Report ([xml]$xml))
+        $got.Count | Should -Be 1
+        $got[0].Name | Should -Be 'SeDenyBatchLogonRight'
+        $got[0].Sids | Should -Contain 'S-1-5-21-1-2-3-1105'
+        $got[0].Sids.Count | Should -Be 2
+    }
+}
+
+Describe 'Privilege-right membership merging' {
+    BeforeAll {
+        $examples = Join-Path (Split-Path $PSScriptRoot -Parent) 'examples'
+        $text = Get-Content (Join-Path $examples 'New-ScanAccountLogonRightsGpo.ps1') -Raw
+        $m = [regex]::Match($text, "(?s)function Add-PrivilegeRightMember \{.*?\n\}")
+        if (-not $m.Success) { throw 'could not extract Add-PrivilegeRightMember from the shipped script' }
+        . ([scriptblock]::Create($m.Value))
+        $script:sid = 'S-1-5-21-1-2-3-1105'
+    }
+
+    It 'does not produce a leading comma when the right has no members' {
+        # 'SeDenyBatchLogonRight = ' with empty membership is exactly what the docs tell an operator to
+        # write to UNDO a deny right, so it is a shape this will meet in the field. A leading comma
+        # renders fine in GPMC while the client-side extension may reject the line.
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $lines.Add('[Privilege Rights]')
+        $lines.Add('SeDenyBatchLogonRight = ')
+        Add-PrivilegeRightMember -Lines $lines -Right 'SeDenyBatchLogonRight' -Sid $script:sid |
+            Should -Be 'appended'
+        $lines[1] | Should -Be ('SeDenyBatchLogonRight = *' + $script:sid)
+    }
+
+    It 'keeps every existing member and drops only the empty entries' {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $lines.Add('[Privilege Rights]')
+        $lines.Add('SeDenyBatchLogonRight = *S-1-5-32-546,,*S-1-5-21-9-9-9-500')
+        [void](Add-PrivilegeRightMember -Lines $lines -Right 'SeDenyBatchLogonRight' -Sid $script:sid)
+        $lines[1] | Should -Not -Match ',,'
+        $lines[1] | Should -Match 'S-1-5-32-546'
+        $lines[1] | Should -Match 'S-1-5-21-9-9-9-500'
+        $lines[1] | Should -Match ([regex]::Escape($script:sid) + '$')
+    }
+
+    It 'treats the right name as a literal, not a regex' {
+        # Without [regex]::Escape, 'Se.*Right' would match -- and rewrite -- an unrelated right's line.
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $lines.Add('[Privilege Rights]')
+        $lines.Add('SeDenyServiceLogonRight = *S-1-5-32-546')
+        [void](Add-PrivilegeRightMember -Lines $lines -Right 'Se.*Right' -Sid $script:sid)
+        @($lines) | Should -Contain 'SeDenyServiceLogonRight = *S-1-5-32-546'
+    }
+}
+
+Describe 'Both logon-rights examples validate the right names they are given' {
+    # The scripts refuse SeDenyNetworkLogonRight by name with -contains, then interpolate the name into a
+    # regex to find the line to write. Without validation, 'SeDenyNetworkLogonRight ' (trailing space)
+    # passes the refusal and still matches the line -- denying the scan account the one logon type an
+    # authenticated scan actually needs. In the per-machine script secedit applies it before the
+    # verification pass notices, and nothing rolls that back.
+    It '<Name> constrains -DenyRight with a ValidatePattern' -ForEach @(
+        @{ Name = 'New-ScanAccountLogonRightsGpo.ps1' }
+        @{ Name = 'Set-ScanAccountLogonRights.ps1' }
+    ) {
+        $path = Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) 'examples') $Name
+        $tokens = $null; $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+        $errors | Should -BeNullOrEmpty
+
+        $param = $ast.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'DenyRight' }
+        $param | Should -Not -BeNullOrEmpty
+
+        $pattern = $param.Attributes |
+            Where-Object { $_.TypeName.Name -eq 'ValidatePattern' } |
+            ForEach-Object { $_.PositionalArguments[0].Value }
+        $pattern | Should -Not -BeNullOrEmpty
+
+        # The pattern must actually reject the dangerous shapes, not merely exist.
+        'SeDenyNetworkLogonRight ' | Should -Not -Match $pattern
+        ' SeDenyNetworkLogonRight' | Should -Not -Match $pattern
+        'Se.*Right'                | Should -Not -Match $pattern
+        'SeDenyBatchLogonRight'    | Should -Match $pattern
+    }
+}
