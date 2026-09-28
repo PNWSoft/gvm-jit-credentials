@@ -10,9 +10,19 @@
   This script closes that gap. It assumes nothing about current state, is safe to run when no scan
   has run, and is idempotent. Schedule it to fire after your longest plausible scan window.
 
-  It exits non-zero if the revoke did not fully succeed, so the task shows failure and you find out.
-  That matters: a backstop that reports success when it failed is worse than no backstop, because
-  you stop looking.
+  Exit codes, because "did it work" has to be answerable from the scheduler alone:
+
+    0  account disabled, password invalidated, and the scanner's stored copy overwritten.
+    1  the AD revoke itself failed -- the account may still be usable with a known password. This is
+       the one that means NOT SAFE; -Strict throws, so the task reports failure.
+    3  the account is secured, but overwriting the scanner's stored copy failed (event 1010, Warning).
+       The AD reset has already invalidated that value, so nothing usable is left behind. What this
+       actually signals is a broken GMP path, worth knowing before the next grant needs it.
+
+  A backstop that reports success when part of it failed is worse than no backstop, because you stop
+  looking. But one that screams NOT SAFE over a hygiene failure trains you to ignore it, which ends
+  the same way -- so the two get different codes rather than one undifferentiated alarm. Treat a 3 as
+  "look this week", a 1 as "look now".
 
   Register with (adjust to taste):
 
@@ -74,4 +84,12 @@ $r = Revoke-GvmScanCredential -Identity (Get-Cfg 'Identity' -Required) -Credenti
 "  disabled         : $($r.Disabled)"
 "  passwordReset    : $($r.PasswordReset)"
 "  greenboneBlanked : $($r.GreenboneBlanked)"
-if ($r.Warnings.Count -gt 0) { $r.Warnings | ForEach-Object { "  warning: $_" } }
+if ($r.Warnings.Count -gt 0) {
+    $r.Warnings | ForEach-Object { "  warning: $_" }
+    # Distinct from both outcomes above. -Strict has already thrown if the AD revoke failed, so
+    # reaching here means the account IS secured and this is not an emergency -- but the scheduler
+    # must not show a clean run when part of the job did not happen. Verified by running it: a bad
+    # CredentialId used to produce greenboneBlanked=False and still exit 0.
+    exit 3
+}
+exit 0

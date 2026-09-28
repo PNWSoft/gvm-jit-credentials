@@ -22,6 +22,13 @@
         -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 01:00) `
         -Principal (New-ScheduledTaskPrincipal -UserId 'EXAMPLE\gvm-runner$' -LogonType Password -RunLevel Limited)
 
+  Exit codes (the backstop uses the same 0/1/3 meanings, so one convention covers both tasks):
+    0  scanned, and the credential fully revoked.
+    1  the credential revoked, but the scan did not reach Done -- a scan problem, not a security one.
+    2  the revoke reported errors. The account may still be usable: investigate NOW.
+    3  scanned and revoked, but the scanner's stored copy was not overwritten (event 1010). Nothing
+       usable is left behind; it points at a broken GMP path.
+
   -ExecutionPolicy AllSigned in the task action is worth keeping even if the machine policy is
   laxer: process scope wins, so a tampered or unsigned script cannot run under this task. It fails
   closed. Note that it also means THIS file and the module must be signed with a certificate the
@@ -67,10 +74,18 @@ $result = Invoke-GvmJitScan -Identity (Get-Cfg 'Identity' -Required) -Credential
 "Revoked     : disabled=$($result.Revoke.Disabled) passwordReset=$($result.Revoke.PasswordReset)"
 if ($result.Revoke.Warnings.Count -gt 0) { $result.Revoke.Warnings | ForEach-Object { Write-Warning $_ } }
 
-# Make the task's exit code mean something, rather than leaving it to inference.
+# Make the task's exit code mean something, rather than leaving it to inference. Checked in order of
+# severity: a run can qualify for more than one of these, and the scheduler shows you only one number.
 if ($result.Revoke.Errors.Count -gt 0) {
-    $result.Revoke.Errors | ForEach-Object { Write-Error $_ }
+    # -ErrorAction Continue is load-bearing, not noise. This script sets $ErrorActionPreference =
+    # 'Stop', under which Write-Error TERMINATES -- so the script died here and exited 1, and the
+    # 'exit 2' below was unreachable. The one outcome meaning "the account may still be usable"
+    # was therefore indistinguishable from an ordinary failed scan.
+    $result.Revoke.Errors | ForEach-Object { Write-Error $_ -ErrorAction Continue }
     exit 2          # scan may be fine, but the credential did not fully revoke: investigate NOW
 }
-if ($result.Status -ne 'Done') { exit 1 }
+if ($result.Status -ne 'Done') { exit 1 }   # credential revoked; it is the scan that failed
+# Revoked and scanned, but the scanner's stored copy was not overwritten -- same meaning as the
+# backstop's 3: nothing usable is left behind, and the GMP path needs a look before the next grant.
+if ($result.Revoke.Warnings.Count -gt 0) { exit 3 }
 exit 0

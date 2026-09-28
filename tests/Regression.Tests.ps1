@@ -317,3 +317,113 @@ Describe 'Write-JitLog source resolution' {
         }
     }
 }
+
+Describe 'Scheduled-task exit-code contract' {
+    # These run the entry-point scripts as CHILD PROCESSES against a stub module, because the thing
+    # under test IS the exit code, and a dot-sourced 'exit' would kill the test host instead. The
+    # scripts take -ModulePath precisely so the module can be substituted here.
+    #
+    # The regression: a bad CredentialId left greenboneBlanked=$false, put a message in Warnings,
+    # and the backstop still exited 0 -- while its own help promised non-zero when the revoke did not
+    # fully succeed. Found by running it against a live scanner, not by any test that existed then.
+
+    BeforeAll {
+        $script:tmp = Join-Path ([IO.Path]::GetTempPath()) ("gvmjit-exit-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $script:tmp -Force | Out-Null
+        $script:examples = Join-Path (Split-Path $PSScriptRoot -Parent) 'examples'
+
+        $script:cfg = Join-Path $script:tmp 'config.psd1'
+        @'
+@{
+    Identity     = 'stub-scan'
+    CredentialId = '11111111-2222-3333-4444-555555555555'
+    ScannerHost  = 'relay@scanner.invalid'
+    GmpHelper    = '/opt/greenbone/gmp.sh'
+    TaskId       = '66666666-7777-8888-9999-aaaaaaaaaaaa'
+}
+'@ | Set-Content -LiteralPath $script:cfg -Encoding Ascii
+
+        # Builds a stub module whose Revoke/Scan return whatever the case under test needs.
+        function script:New-StubModule {
+            param([string]$Name, [string[]]$Warnings = @(), [string[]]$Errors = @(), [string]$Status = 'Done')
+            $path = Join-Path $script:tmp "$Name.psm1"
+            $w = if ($Warnings) { "@('" + ($Warnings -join "','") + "')" } else { '@()' }
+            $e = if ($Errors)   { "@('" + ($Errors   -join "','") + "')" } else { '@()' }
+            @"
+function New-StubRevoke {
+    [pscustomobject]@{
+        Identity = 'stub-scan'; Server = 'dc.invalid'
+        Disabled = `$true; PasswordReset = `$true
+        GreenboneBlanked = ($(if ($Warnings) { '$false' } else { '$true' }))
+        Warnings = [string[]]$w
+        Errors   = [string[]]$e
+        RevokedAt = Get-Date
+    }
+}
+function Revoke-GvmScanCredential {
+    param(`$Identity, `$CredentialId, `$ScannerHost, `$GmpHelper, `$IdentityFile, `$LogSource,
+          [switch]`$Strict, `$Grant)
+    `$r = New-StubRevoke
+    if (`$Strict -and `$r.Errors.Count -gt 0) { throw ('Revoke incomplete: ' + (`$r.Errors -join ' | ')) }
+    `$r
+}
+function Invoke-GvmJitScan {
+    param(`$Identity, `$CredentialId, `$TaskId, `$ScannerHost, `$GmpHelper, `$IdentityFile,
+          `$ReplicationDelaySeconds, `$PollSeconds, `$MaxScanMinutes, `$LogSource, `$ScanAction)
+    [pscustomobject]@{
+        Status = '$Status'; ReportId = 'rpt-1'; Duration = [timespan]::FromSeconds(3)
+        Revoke = New-StubRevoke
+    }
+}
+Export-ModuleMember -Function Revoke-GvmScanCredential, Invoke-GvmJitScan
+"@ | Set-Content -LiteralPath $path -Encoding Ascii
+            $path
+        }
+
+        function script:Invoke-EntryScript {
+            param([string]$Script, [string]$ModulePath)
+            # Bypass: the working-tree copies are unsigned source. The signed artifact is verified
+            # separately by examples\Sign-Module.ps1 re-parsing every file after signing.
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+                (Join-Path $script:examples $Script) -ConfigPath $script:cfg -ModulePath $ModulePath *> $null
+            $LASTEXITCODE
+        }
+    }
+
+    AfterAll { Remove-Item $script:tmp -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'backstop exits 0 when the revoke fully succeeded' {
+        $m = script:New-StubModule -Name 'clean'
+        script:Invoke-EntryScript -Script 'backstop-task.ps1' -ModulePath $m | Should -Be 0
+    }
+
+    It 'backstop exits 3 when the AD revoke worked but the scanner copy was not overwritten' {
+        $m = script:New-StubModule -Name 'warned' -Warnings @('Greenbone credential blanking failed: status=404')
+        script:Invoke-EntryScript -Script 'backstop-task.ps1' -ModulePath $m | Should -Be 3
+    }
+
+    It 'backstop exits non-zero when the AD revoke itself failed' {
+        $m = script:New-StubModule -Name 'errored' -Errors @('DISABLE FAILED')
+        script:Invoke-EntryScript -Script 'backstop-task.ps1' -ModulePath $m | Should -Not -Be 0
+    }
+
+    It 'scan-task exits 0 on a clean scan and revoke' {
+        $m = script:New-StubModule -Name 'scanclean'
+        script:Invoke-EntryScript -Script 'scan-task.ps1' -ModulePath $m | Should -Be 0
+    }
+
+    It 'scan-task exits 3 when only the scanner copy was left stale' {
+        $m = script:New-StubModule -Name 'scanwarned' -Warnings @('Greenbone credential blanking failed: status=404')
+        script:Invoke-EntryScript -Script 'scan-task.ps1' -ModulePath $m | Should -Be 3
+    }
+
+    It 'scan-task exits 1 when the scan did not reach Done, even though the revoke was clean' {
+        $m = script:New-StubModule -Name 'scanstopped' -Status 'Stopped'
+        script:Invoke-EntryScript -Script 'scan-task.ps1' -ModulePath $m | Should -Be 1
+    }
+
+    It 'scan-task exits 2 when the revoke reported errors, which outranks the scan result' {
+        $m = script:New-StubModule -Name 'scanerrored' -Errors @('PASSWORD INVALIDATION FAILED') -Status 'Stopped'
+        script:Invoke-EntryScript -Script 'scan-task.ps1' -ModulePath $m | Should -Be 2
+    }
+}
