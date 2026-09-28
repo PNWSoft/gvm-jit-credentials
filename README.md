@@ -342,7 +342,7 @@ AD or GMP directly instead of through those seams, it becomes untestable — ple
 Extracted from a working deployment, then run against it. As of 0.1.0 every script here had been
 executed against a live Greenbone 22.7 instance and a multi-DC Active Directory domain: the full
 grant/scan/revoke lifecycle, task reuse and its refusal path, the AD delegation, the scanner relay
-under load, and the backstop's failure path including a deliberately failing revoke. The 75-case test
+under load, and the backstop's failure path including a deliberately failing revoke. The 81-case test
 suite needs neither.
 
 The three scheduled-task entry points were re-verified as a signed deployment, run by the runner gMSA
