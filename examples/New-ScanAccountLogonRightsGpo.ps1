@@ -158,12 +158,31 @@ function Add-SortedCseGroup {
 
 # ---------------------------------------------------------------- principal
 
-$sid = (New-Object Security.Principal.NTAccount($Identity)).Translate(
-            [Security.Principal.SecurityIdentifier]).Value
-Write-Host "$Identity resolves to $sid"
-
 $pdc = (Get-ADDomain).PDCEmulator
 $domainDn = (Get-ADDomain).DistinguishedName
+
+# Resolved from ACTIVE DIRECTORY first, not from NTAccount.Translate(). The Windows name-to-SID cache can
+# hand back the SID of a DELETED account when a name has been recreated, and a stale SID written into a
+# deny right denies nothing to nobody -- the rights would look correct in every report and protect no one.
+# Asking a DC for the object gives the current SID and its class in the same answer.
+$samName = ($Identity -split '\')[-1]
+$adObj = Get-ADObject -Filter "sAMAccountName -eq '$samName'" -Server $pdc `
+            -Properties objectSid, objectClass, sAMAccountName -ErrorAction SilentlyContinue |
+         Select-Object -First 1
+if ($adObj) {
+    $sid = $adObj.objectSid.Value
+    $objClass = $adObj.objectClass
+    Write-Host "$Identity resolves to $sid (from $pdc, class '$objClass')"
+}
+else {
+    # Not a plain sAMAccountName in this domain -- a UPN, or a principal from a trusted domain. Fall back
+    # to the local translation, then confirm the SID against the directory before trusting it.
+    $sid = (New-Object Security.Principal.NTAccount($Identity)).Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+    Write-Host "$Identity resolves to $sid (via the local name cache; not found as a sAMAccountName here)"
+    $byId = Get-ADObject -Filter "objectSid -eq '$sid'" -Server $pdc -Properties objectClass -ErrorAction SilentlyContinue
+    $objClass = if ($byId) { $byId.objectClass } else { $null }
+}
 
 if (-not $Force) {
     # A well-known SID (Everyone S-1-1-0, Administrators S-1-5-32-544, Authenticated Users S-1-5-11)
@@ -172,12 +191,15 @@ if (-not $Force) {
     if ($sid -notmatch '^S-1-5-21-') {
         throw "$Identity resolves to the well-known SID $sid, not a domain account. Refusing (-Force overrides)."
     }
-    $obj = Get-ADObject -Filter "objectSid -eq '$sid'" -Server $pdc -Properties objectClass -ErrorAction Stop
-    if (-not $obj) { throw "Could not find a directory object for $sid." }
-    if ($obj.ObjectClass -ne 'user') {
-        throw ("$Identity is a '$($obj.ObjectClass)', not a user. Denying these rights to a group, " +
-               'computer or managed service account has a blast radius nobody intends -- and a gMSA is ' +
-               'normally the RUNNER, which needs batch logon. Refusing (-Force overrides).')
+    if (-not $objClass) {
+        throw ("No directory object on $pdc has the SID $sid. If this name was recently deleted and " +
+               'recreated, the local name cache may still be returning the SID of the deleted one -- and a ' +
+               'stale SID in a deny right protects nobody. Check with: Get-ADUser ' + $samName + ' | Select SID')
+    }
+    if ($objClass -ne 'user') {
+        throw ("$Identity is a '$objClass', not a user. Denying these rights to a group, computer or " +
+               'managed service account has a blast radius nobody intends -- and a gMSA is normally the ' +
+               'RUNNER, which needs batch logon. Refusing (-Force overrides).')
     }
     Write-Host "  confirmed: a domain user object on $pdc"
 }
