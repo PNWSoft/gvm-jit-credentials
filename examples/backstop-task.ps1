@@ -58,7 +58,7 @@ function Get-Cfg {
 # Assigned rather than left on the pipeline: emitting the result object dumps a Format-List with
 # blank lines into the task log, burying the event lines that actually matter.
 $r = Revoke-GvmScanCredential -Identity (Get-Cfg 'Identity' -Required) -CredentialId (Get-Cfg 'CredentialId' -Required) `
-    -ScannerHost (Get-Cfg 'ScannerHost' -Required) -GmpHelper (Get-Cfg 'GmpHelper' -Required) -IdentityFile (Get-Cfg 'Identity' -Required)File `
+    -ScannerHost (Get-Cfg 'ScannerHost' -Required) -GmpHelper (Get-Cfg 'GmpHelper' -Required) -IdentityFile (Get-Cfg 'IdentityFile' '') `
     -LogSource $LogSource -Strict
 
 "Backstop revoke for '$($r.Identity)' via $($r.Server)"

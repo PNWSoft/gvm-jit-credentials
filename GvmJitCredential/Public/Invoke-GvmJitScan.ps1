@@ -133,7 +133,7 @@ function Invoke-GvmJitScan {
             $report = $doc.SelectSingleNode('//task/last_report/report')
             if ($report) { $result.ReportId = $report.GetAttribute('id') }
             $result.Status = $status
-            Write-JitLog "Scan reached terminal state: $status" 1006 'Information' $LogSource
+            Write-JitLog "Scan reached terminal state: $status" 1020 'Information' $LogSource
         }
     }
     finally {

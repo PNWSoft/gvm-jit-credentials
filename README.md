@@ -27,12 +27,16 @@ between scans — which is most of the time — there is a domain account with l
 estate, whose password sits in a database on an appliance, and which nothing is watching because it
 is *supposed* to be there.
 
-The obvious Windows answer is a group-managed service account: let AD own the password so no human
-or database holds a standing secret. That does not work here — Greenbone needs a plaintext password
-it can store and replay over SMB, which is exactly what a gMSA will not give you. This module is the
-nearest equivalent for a credential that must be handed to a third-party scanner: the same goal of
-"no standing usable secret", reached by disabling the account and rotating the password around each
-scan instead of by letting AD manage it.
+The obvious Windows answer is a group-managed service account: let AD own the password so no human or
+database holds a standing secret. A gMSA does not solve this particular problem, though not for the
+reason usually given — an authorised principal *can* retrieve `msDS-ManagedPassword`, so the runner
+could fetch it and hand it to Greenbone. The problem is what happens next: Greenbone stores that
+password, and a gMSA password stays valid for about 30 days, so you are back to a standing credential
+in the scanner database — the thing you were trying to avoid — and a gMSA cannot be disabled between
+scans without defeating the point of using one.
+
+This reaches the same goal by other means: disable the account and rotate the password around each
+scan, rather than delegating password management to AD.
 
 It reduces *when* the account can be used. It does not reduce what the account can do while a scan is
 running.
@@ -47,16 +51,22 @@ running.
   the next scan window opens. (Getting this wrong is easy: reusing the value written to AD during
   revoke would leave the scanner holding the account's *current* password, collapsing the two layers
   into one. `tests/Regression.Tests.ps1` pins it.)
-- **Detection becomes trivial, which is the underrated half.** A disabled account has no legitimate
-  reason to be used at all, so *any* authentication attempt outside the scan window is anomalous by
-  construction — there is no baseline to learn and no threshold to tune. Compare that with a
-  permanently-enabled scan account, where distinguishing malicious use from normal use is genuinely
-  hard. This repository does not supply monitoring; it makes the monitoring easy to write.
-  `examples/Test-ScanAccountLogons.ps1` is a starting point, not a product.
-- A tampered scheduled task fails closed rather than escalating, when combined with
-  `-ExecutionPolicy AllSigned` in the task action. Note this protects *scripts*, not `config.psd1`:
-  that is data, not signed, so its directory must be admin-only. Parameters that reach a command
-  line (`ScannerHost`, `GmpHelper`) and every Greenbone UUID are pattern-validated for this reason.
+- **The signal for detection becomes unambiguous**, which is the underrated half. A disabled account
+  has no legitimate reason to be used, so an authentication attempt outside the scan window is
+  anomalous *by construction* rather than by comparison against a learned baseline — contrast a
+  permanently-enabled scan account, where separating malicious use from normal use is genuinely hard.
+  Collecting that signal still takes work: type 3 logons land on each member server's Security log
+  rather than on a DC, so you need event forwarding or per-host queries. Attempts against the
+  *disabled* account do surface centrally on a DC, as 4776 with `0xC0000072` or Kerberos 4768 with
+  `KDC_ERR_CLIENT_REVOKED`, which is the cheapest place to watch. This repository does not supply
+  monitoring; `examples/Test-ScanAccountLogons.ps1` is a starting point, not a product.
+- Defence in depth rather than a primary control: with `-ExecutionPolicy AllSigned` in the task
+  action, a tampered *script* fails to run instead of running as the runner. It does not help against
+  a tampered *task* — an attacker who can edit the action simply removes the flag — and both need
+  write access that the deployment notes already say must be admin-only. Separately, and independent
+  of signing: `config.psd1` and the state file are unsigned data, so parameters that reach a command
+  line (`ScannerHost`, `GmpHelper`) and every Greenbone UUID are pattern-validated, and a reused task
+  is verified against the current run before it is started.
 
 **What this does NOT fix — read this part**
 
@@ -85,6 +95,12 @@ running.
   is only as private as that event log.
 - **Anyone who is already admin on the runner host** can do all of this themselves. This defends
   the credential at rest, not the machine that legitimately holds it.
+- **Nor does it defend the scanner host.** This moves the standing secret out of the appliance
+  database; it does not move the appliance out of your trust boundary. A one-time theft of the stored
+  value — a stolen backup, a database dump — gains nothing, because the next window uses a fresh
+  random value. But *persistent* root on the scanner gets the live credential every window: from
+  gvmd's database, or from the relay's tmpfs directory while a request is in flight. Against a
+  compromised scanner this narrows the blast radius of a snapshot, not of ongoing access.
 - **Your target list is only as trustworthy as your AD hygiene.** `examples/weekly-ou-scan.ps1`
   resolves every *enabled* computer object in an OU through DNS at run time. A decommissioned machine
   whose object was never deleted and whose A record has since been scavenged is a name that any
@@ -106,9 +122,12 @@ running.
    emulator, push that same value into the Greenbone credential object. AD first, Greenbone second:
    the reverse order would leave Greenbone holding a password AD does not have, producing
    authentication failures across every target, which looks exactly like an attack in progress.
-2. **Wait** — for the reset to replicate to the DCs your targets will authenticate against. Too
-   short and the scan silently falls back to unauthenticated results, which reads as a clean scan
-   rather than a failed one.
+2. **Wait** — for the change to replicate to the DCs your targets will authenticate against. The
+   attribute that matters is the *enabled* flag more than the password: a DC that fails a password
+   check normally forwards it to the PDC emulator, so a not-yet-replicated password is usually
+   rescued, whereas a DC that still believes the account is disabled rejects outright. Too short a
+   wait and the scan falls back to unauthenticated results, which reads as a clean scan rather than a
+   failed one.
 3. **Scan** — start a Greenbone task and poll it, or run your own orchestration.
 4. **Revoke** — always, in a `finally` block: disable the account, reset the password to a value
    nobody records, overwrite the stored Greenbone value.
@@ -124,8 +143,10 @@ Neither password ever reaches a command line, which takes more care than it soun
   rule letting the scan account run **that one command** and nothing else, so the SSH account never
   needs docker-group membership — which on any Docker host is root-equivalent.
 - The relay writes the request and a `gvm-tools.conf` into a `mktemp` directory under **`/dev/shm`**
-  (tmpfs, so neither touches disk), `0444` root-owned inside a `0700` root-owned directory, and
-  bind-mounts them read-only. `gvm-cli` receives file paths, never values.
+  — tmpfs, so neither is written to the filesystem, although tmpfs pages *can* be swapped, making this
+  "off disk" only to the extent that swap is disabled or encrypted. Both are `0444` root-owned inside
+  a `0700` root-owned directory and bind-mounted read-only; `gvm-cli` receives file paths, never
+  values.
 
 Two details there are load-bearing and easy to "simplify" wrongly. **`gvm-cli` cannot read the
 request from stdin** — omitting the positional file gives
@@ -164,9 +185,11 @@ is. `examples/Add-ScanAccountLocalAdmin.ps1` refuses to run if a domain controll
 you point it at, for that reason.
 
 A common approach — the one this was extracted from — is to keep DCs free of third-party software and
-scan them **unauthenticated**, as a separate task with its own target. Where that holds, Microsoft
-Update plus an unauthenticated scan gives many people decent coverage, because a good deal of what
-authenticated scanning adds is third-party patch and configuration detail that is not present to find.
+scan them **unauthenticated**, as a separate task with its own target. Where that holds, a managed
+patch process plus an unauthenticated scan gives many people coverage they are comfortable with. It is
+a trade rather than a free win: authenticated scanning is also how a scanner confirms OS patch state
+and local configuration, so you are choosing to verify those through your patch reporting and
+configuration baseline instead of through the scan.
 
 How well that generalises depends on your estate. DCs that do run third-party software — backup
 agents, monitoring, AV management, PKI or HSM tooling — have more that an unauthenticated scan will not
@@ -178,16 +201,19 @@ have made the decision elsewhere.
 
 ## Scope
 
-v1 covers exactly one configuration, because it is the only one that has been tested:
+Version 0.1.0 covers exactly one configuration, because it is the only one that has been tested:
 
 - **Scan targets:** Windows hosts in an Active Directory domain
 - **Scan account:** an AD user account
 - **Runner:** Windows, PowerShell 5.1 or later, with RSAT
 - **Scanner:** Greenbone Community Edition in Docker on Linux, reachable over SSH
 
-The seam for other setups is `host/gmp-relay.sh` and the four AD wrappers in
-`GvmJitCredential/Private/` — nothing else knows how credentials are stored or how the scanner is
-reached. Contributions welcome; please don't claim support for a configuration you haven't run.
+Porting to another setup touches more than one seam:
+`GvmJitCredential/Private/Invoke-GmpRequest.ps1` owns how the scanner is reached, `host/gmp-relay.sh`
+owns the Docker end of that transport, the `Set-Jit*` and `Resolve-Jit*` wrappers in `Private/` own
+every Active Directory call, and the `<modify_credential>` bodies in `Grant-` and
+`Revoke-GvmScanCredential.ps1` own how the credential is stored. Contributions welcome; please don't
+claim support for a configuration you haven't run.
 
 ## Install
 
@@ -222,7 +248,9 @@ Two things the scripts cannot do for you:
   where *it* runs, which may not be the runner. If it is missing, the audit trail goes to the task
   log only — you get one warning saying so, rather than silence.
 
-Every script supports `-WhatIf`. Use it first.
+The bootstrap scripts and `weekly-ou-scan.ps1` support `-WhatIf`. Use it first. The scheduled-task
+entry points (`scan-task.ps1`, `backstop-task.ps1`) do not, because they delegate to functions that
+implement it; `Test-ScanAccountLogons.ps1` does not, because it only reads.
 
 ## Gotchas that will cost you an afternoon
 
@@ -233,7 +261,9 @@ runner's `.ssh` directory to copy the key — adding an ACE makes OpenSSH reject
 permissive permissions, breaking the working task.
 
 **`known_hosts` belongs to the runner account too.** With `BatchMode=yes`, an unknown host key makes
-`ssh` fail *silently* with exit 255. Verify the fingerprint out of band before trusting it.
+`ssh` exit 255 with no prompt and nothing useful on the console — this module captures stderr and
+reports `ssh exit 255: Host key verification failed`, but anything calling raw `ssh` will not. Verify
+the fingerprint out of band before trusting it.
 
 **An `authorized_keys` forced command overrides the command the client asks for.** Pinning the key
 is worth doing — a stolen key then yields GMP relay access rather than a shell — but it also means
@@ -244,8 +274,9 @@ log on the scanner is the ground truth for which one actually ran.
 **`-CannotChangePassword` does not block rotation.** That flag stops the *user* changing their own
 password; the module uses an administrative reset, which is unaffected.
 
-**Under `AllSigned`, this module will not load unless you sign it.** All of `GvmJitCredential/*.ps1`,
-the `.psm1`, the `.psd1`, and any bootstrap or example script you run. Sign with *your* certificate,
+**Under `AllSigned`, this module will not load unless you sign it.** Everything under `GvmJitCredential/`
+(both `Public/` and `Private/`, plus the `.psm1` and `.psd1`), and any bootstrap or example script you
+run. Sign with *your* certificate,
 not one from this repo. `examples/Sign-Module.ps1` does the loop, refuses to sign a non-CRLF file,
 and re-parses everything afterwards — validating *before* signing proves nothing, because signing is
 the step that can corrupt the file.
@@ -268,13 +299,14 @@ AD or GMP directly instead of through those seams, it becomes untestable — ple
 
 ## Status
 
-Extracted from a working deployment, then run against it. Every script here has been executed against
-a live Greenbone 22.7 instance and a multi-DC Active Directory domain: the full grant/scan/revoke
-lifecycle, task reuse and its refusal path, the AD delegation, the scanner relay under load, and the
-backstop's failure path. The 60-case test suite needs neither.
+Extracted from a working deployment, then run against it. As of 0.1.0 every script here had been
+executed against a live Greenbone 22.7 instance and a multi-DC Active Directory domain: the full
+grant/scan/revoke lifecycle, task reuse and its refusal path, the AD delegation, the scanner relay
+under load, and the backstop's failure path including a deliberately failing revoke. The 60-case test
+suite needs neither.
 
 That is not a claim of correctness — it is a statement that nothing here is untried, which for this
-kind of tool is the minimum bar. v1 supports one configuration for the same reason.
+kind of tool is the minimum bar. It supports one configuration for the same reason.
 
 ## License
 

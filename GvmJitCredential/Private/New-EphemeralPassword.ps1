@@ -12,7 +12,7 @@ function New-EphemeralPassword {
       it may end up in a support transcript being compared by eye.
 
       This returns a [string], not a SecureString, because Set-ADAccountPassword and the GMP
-      payload both need the plaintext anyway. See CAVEATS in the README: .NET strings are
+      payload both need the plaintext anyway. See the README, under "Threat model -- What this does NOT fix": .NET strings are
       immutable and are not zeroed, so the value exists in process memory until collected.
       Do NOT enable PowerShell transcription for the account that runs this.
     #>

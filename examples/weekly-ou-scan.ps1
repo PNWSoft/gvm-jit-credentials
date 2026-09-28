@@ -7,13 +7,15 @@
   Invoke-GvmJitScan, while this script supplies the scan orchestration, because the host set changes
   between runs and so a fixed Greenbone task cannot represent it.
 
-  Each run builds a FRESH target and task from current OU membership. That is not a stylistic choice:
-  GVM refuses to edit a target that is in use, and refuses to retarget a task that has already run,
-  so a long-lived task cannot follow a changing inventory.
+A task cannot follow a changing inventory: GVM refuses to edit a target that is in use, and refuses
+  to retarget a task that has already run ("Status must be New to edit Target"). So when the host set
+  CHANGES, this creates a fresh target and task.
 
-  KNOWN CONSEQUENCE: one target and one task accumulate per run, and Greenbone never prunes them.
-  After a year of weekly scans that is 52 dead tasks, each holding a report that any "latest report
-  per task" query will happily treat as current. Prune them, or filter by report age downstream.
+  When the host set is UNCHANGED it reuses the task recorded in -StateFile, after verifying that the
+  task's scan config, scanner, target host list and SMB credential all match this run. That keeps the
+  reports accumulating as history under one task instead of leaving a dead target and task behind
+  every single run -- 52 a year, each holding a report that any "latest report per task" query would
+  treat as current.
 
 .PARAMETER SearchBase
   OU distinguished name whose ENABLED computers become the target,
@@ -30,9 +32,14 @@
   dead task and target behind every run. Delete the file to force a fresh task.
 
 .PARAMETER AlertId
-  Optional Greenbone alert UUID to attach to the per-run task. It MUST be passed here: because each
-  run creates a new task, an alert attached to a previous task does not carry over. Omitting it is a
-  silent failure -- scans run, findings land, and no alert is ever sent.
+  Optional Greenbone alert UUID to attach to a newly created task. Pass it here rather than attaching
+  an alert in the Greenbone UI: when the host set changes, a NEW task is created and an alert attached
+  to the previous one does not carry over. Omitting it is a silent failure -- scans run, findings land,
+  and no alert is ever sent.
+
+  NOTE: a task being REUSED is not re-checked for the alert, so adding -AlertId to an existing
+  deployment has no effect until the host set next changes. Delete the state file to force a new task
+  if you need it applied immediately.
 
 .EXAMPLE
   .\weekly-ou-scan.ps1 -Identity gvm-scan -ScannerHost scanner@scanner.example.local `

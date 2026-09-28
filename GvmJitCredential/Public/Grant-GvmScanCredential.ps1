@@ -112,7 +112,7 @@ function Grant-GvmScanCredential {
         throw
     }
     finally {
-        # Drops our references. It does NOT zero the strings -- see CAVEATS in the README. $body is
+        # Drops our references. It does NOT zero the strings -- see the README, under "Threat model -- What this does NOT fix". $body is
         # cleared too: it carries the same plaintext as $password.
         $password = $null
         $body = $null

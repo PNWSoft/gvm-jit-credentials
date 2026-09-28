@@ -45,7 +45,7 @@ jobs:
         run: |
           Import-Module ./GvmJitCredential/GvmJitCredential.psd1 -Force
           $n = (Get-Command -Module GvmJitCredential).Count
-          if ($n -lt 3) { throw "expected 3 exported functions, got $n" }
+          if ($n -ne 5) { throw "expected 5 exported functions, got $n" }
           Write-Host "imported OK with $n exported functions"
 
       - name: Pester

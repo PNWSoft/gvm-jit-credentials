@@ -55,7 +55,7 @@ function Get-Cfg {
 
 $result = Invoke-GvmJitScan -Identity (Get-Cfg 'Identity' -Required) -CredentialId (Get-Cfg 'CredentialId' -Required) `
     -TaskId (Get-Cfg 'TaskId' -Required) -ScannerHost (Get-Cfg 'ScannerHost' -Required) -GmpHelper (Get-Cfg 'GmpHelper' -Required) `
-    -IdentityFile (Get-Cfg 'Identity' -Required)File `
+    -IdentityFile (Get-Cfg 'IdentityFile' '') `
     -ReplicationDelaySeconds (Get-Cfg 'ReplicationDelaySeconds' 45) `
     -PollSeconds (Get-Cfg 'PollSeconds' 30) -MaxScanMinutes (Get-Cfg 'MaxScanMinutes' 300) `
     -LogSource $LogSource

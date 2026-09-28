@@ -129,8 +129,9 @@ if (-not [System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
 }
 else { Write-Host "  event log source '$EventLogSource' already present" -ForegroundColor Yellow }
 Write-Host '  NOTE: the event log source is machine-local. If you ran this bootstrap somewhere' -ForegroundColor Yellow
-Write-Host '  other than the RUNNER host, create it there too or the grant/revoke audit trail' -ForegroundColor Yellow
-Write-Host "  silently vanishes: New-EventLog -LogName Application -Source '$EventLogSource'" -ForegroundColor Yellow
+Write-Host '  other than the RUNNER host, create it there too, or the audit trail for each run goes' -ForegroundColor Yellow
+Write-Host '  to the task log only. The module warns once per run when the source is missing, so it' -ForegroundColor Yellow
+Write-Host "  is visible rather than silent: New-EventLog -LogName Application -Source '$EventLogSource'" -ForegroundColor Yellow
 
 Write-Host @"
 
