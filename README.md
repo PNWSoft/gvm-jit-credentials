@@ -69,6 +69,20 @@ machine for a small estate, for a host a GPO does not reach, or just to report w
 actually says — and if a GPO does manage these rights, it reapplies on its own schedule and overwrites
 any local change.
 
+Two properties of user rights caught us out, both confirmed against a live domain, and both matter before
+you create a GPO for this:
+
+- **They do not merge across GPOs.** A user right is won as a whole membership list, not setting by
+  setting: the highest-precedence GPO's list for `SeDenyBatchLogonRight` *replaces* every other GPO's
+  list for it. Linking a second GPO that set these four rights took an already-restricted scan account
+  from 4 deny rights to 0. If a GPO in scope already sets any of them, add the account to **that** GPO
+  rather than creating a second one. `New-ScanAccountLogonRightsGpo.ps1` checks the target OU for this
+  and warns before it links, but it cannot decide for you.
+- **They tattoo.** Unlinking or deleting the GPO does not hand the rights back; the values are written
+  into each machine's local security database and stay until something overwrites them. To undo a deny
+  right, empty its membership in the GPO that set it and let that apply — deleting the GPO freezes the
+  last state instead of reverting it.
+
 Worth being honest about what this buys: an interactive logon as this account needs the same password a
 network logon needs, and the network path stays open because the scan needs it. So it does not stop
 someone holding the password — it removes other ways to use one if obtained, and makes an interactive

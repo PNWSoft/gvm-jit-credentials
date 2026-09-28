@@ -28,6 +28,20 @@
   that failed to author correctly is never left applying to anything. An existing GPO keeps its other
   settings: [Privilege Rights] is merged member-wise, and other sections are rewritten verbatim.
 
+  TWO THINGS ABOUT USER RIGHTS THAT SURPRISE PEOPLE, both demonstrated live while building this script.
+
+    They do not MERGE across GPOs. Every other Group Policy setting you are used to either merges or is
+    simply won by the highest-precedence GPO for that one setting. A user right is won as a WHOLE LIST:
+    the winning GPO's membership for, say, SeDenyBatchLogonRight replaces every other GPO's membership
+    for it. Linking a second GPO that sets these four rights took an already-restricted scan account
+    from 4 deny rights to 0. If a GPO here already sets any of these rights, add the account to THAT
+    GPO instead of creating a second one. This script checks for that before it links, and says so.
+
+    They TATTOO. Unlinking or deleting the GPO does not give the rights back. The setting is written into
+    each machine's local security database and stays there until some GPO overwrites it, so a removed
+    GPO leaves its last state in place indefinitely. To undo a deny right, empty the membership in the
+    GPO that set it and let that apply -- do not just delete the GPO.
+
   DELIBERATELY NOT INCLUDED. A full scan-target GPO usually also sets Remote Registry to Automatic and
   grants local administrator through Group Policy Preferences. Those enable scanning rather than restrict
   the account, GPP items are not practical to author this way, and local admin has its own sample in
@@ -296,8 +310,42 @@ else { Write-Host '  OK   SeDenyNetworkLogonRight does not list the account' -Fo
 if ($bad -gt 0) { throw "$bad verification problem(s). The GPO has NOT been linked." }
 
 if ($LinkToOU) {
-    $already = Get-GPInheritance -Target $LinkToOU -Server $pdc |
-        Select-Object -ExpandProperty GpoLinks | Where-Object { $_.DisplayName -eq $GpoName }
+    $inh = Get-GPInheritance -Target $LinkToOU -Server $pdc
+
+    # --- PRECEDENCE, which for these settings decides whether this GPO does anything at all.
+    #     User Rights Assignment does NOT merge across GPOs. The winning GPO's member list for a right
+    #     REPLACES every other GPO's list for that right -- it is not unioned with them. So if another
+    #     GPO already sets one of these four rights here, exactly one of two things happens, and both are
+    #     worth knowing BEFORE the link goes in:
+    #       - that GPO has higher precedence -> this GPO authors perfectly and applies nothing;
+    #       - this GPO has higher precedence -> whoever that GPO was denying STOPS being denied.
+    #     Demonstrated live while building this: linking a second GPO that set these rights took the
+    #     existing scan account from 4 deny rights to 0.
+    $conflicts = @()
+    foreach ($link in @($inh.InheritedGpoLinks)) {
+        if ($link.DisplayName -eq $GpoName) { continue }
+        try { $x = [xml](Get-GPOReport -Guid $link.GpoId -Server $pdc -ReportType Xml) }
+        catch { Write-Warning "  could not read '$($link.DisplayName)' to check for conflicts: $($_.Exception.Message)"; continue }
+        # Same traversal as the verification above: the report's elements are namespace-PREFIXED, so
+        # GetElementsByTagName('UserRightsAssignment') matches nothing, while PowerShell's XML adapter
+        # resolves the property name regardless of prefix.
+        $hit = @()
+        foreach ($e in $x.GPO.Computer.ExtensionData) {
+            foreach ($u in @($e.Extension.UserRightsAssignment)) {
+                if ($u -and $DenyRight -contains $u.Name) { $hit += $u.Name }
+            }
+        }
+        if ($hit) { $conflicts += [pscustomobject]@{ Name = $link.DisplayName; Order = $link.Order; Rights = ($hit | Sort-Object -Unique) } }
+    }
+    if ($conflicts) {
+        Write-Host "`nAnother GPO at $LinkToOU already sets these rights:" -ForegroundColor Yellow
+        foreach ($c in $conflicts) { Write-Host ("  precedence {0}: '{1}' sets {2}" -f $c.Order, $c.Name, ($c.Rights -join ', ')) -ForegroundColor Yellow }
+        Write-Host '  User Rights Assignment does not merge: the highest-precedence GPO wins outright.' -ForegroundColor Yellow
+        Write-Host '  Add this account to that GPO instead, or accept that one of the two lists will be' -ForegroundColor Yellow
+        Write-Host '  discarded entirely. Verify the result on a target with: gpresult /scope computer /h report.html' -ForegroundColor Yellow
+    }
+
+    $already = @($inh.GpoLinks) | Where-Object { $_.DisplayName -eq $GpoName }
     if ($already) { Write-Host "`nalready linked to $LinkToOU" }
     elseif ($PSCmdlet.ShouldProcess($LinkToOU, "Link GPO '$GpoName'")) {
         New-GPLink -Guid $gpo.Id -Target $LinkToOU -Server $pdc -LinkEnabled Yes | Out-Null
