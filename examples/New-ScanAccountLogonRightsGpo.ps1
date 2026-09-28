@@ -178,6 +178,65 @@ function Add-SortedCseGroup {
     return @{ Value = ($sorted -join ''); Added = $true }
 }
 
+function Update-GptIniVersion {
+    <#
+      Rewrites the Version key in a GPT.INI, changing nothing else in the file.
+
+      Only that key is touched. Replacing the file wholesale would drop displayName=, which New-GPO
+      writes -- harmless to clients, since MS-GPOL requires only Version, but there is no reason to
+      discard a key this script does not own.
+
+      Done over BYTES via codepage 28591 (ISO-8859-1), whose 256 code points map one-to-one onto the 256
+      byte values, so decode-then-encode returns the original bytes for any single-byte encoding -- which
+      is what GPMC writes (ANSI). Reading GPT.INI as text and rewriting it as ASCII instead turns a
+      non-ASCII displayName into question marks, corrupting the very key this is preserving. 'Version'
+      and its digits are the same bytes in every single-byte encoding.
+
+      UTF-16 is the one case where bytes cannot be treated as characters: the key reads as V\0e\0r\0...,
+      nothing matches, and the append branch would put single-byte text on the end of a UTF-16 file -- a
+      corrupt GPT.INI, re-corrupted on every later run. So the BOM picks the encoding when there is one.
+      A UTF-8 BOM needs no special case: its bytes survive the 28591 round trip untouched.
+
+      KNOWN LIMITATION, deliberately not handled: a UTF-32LE file begins FF FE 00 00, so it is taken for
+      UTF-16LE and gets UTF-16 text appended. Left alone because a UTF-32 GPT.INI is already unreadable
+      to the Group Policy client before this runs -- GetPrivateProfileInt returns -1 -- so nothing
+      client-visible changes, and no Windows tool writes one. Same for a BOM-less UTF-16 file.
+
+      Two details in the pattern, both measured:
+
+        [^\r\n]* rather than .*$ -- in .NET '.' matches \r and multiline '$' sits before \n, so '.*$'
+        eats the CR and leaves a lone LF behind on a CRLF file.
+
+        [^\S\r\n]* for the leading run, i.e. "whitespace except line breaks". Plain \s matches CR and LF
+        too, so '^\s*Version' can start matching on a blank line ABOVE the key and swallow it. [ \t]
+        fixes that but goes too far the other way: Windows' INI parser accepts a form feed or vertical
+        tab before the key, and skipping those sends this down the append branch, leaving a SECOND
+        Version= line whose stale predecessor is the one GetPrivateProfileInt returns.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$Version
+    )
+    $iniBytes = [IO.File]::ReadAllBytes($Path)
+    # Length guards are load-bearing: under StrictMode indexing [1] of a 1-byte array throws, and -and
+    # short-circuits before it.
+    $enc = if ($iniBytes.Length -ge 2 -and $iniBytes[0] -eq 0xFF -and $iniBytes[1] -eq 0xFE) {
+               [Text.Encoding]::Unicode
+           }
+           elseif ($iniBytes.Length -ge 2 -and $iniBytes[0] -eq 0xFE -and $iniBytes[1] -eq 0xFF) {
+               [Text.Encoding]::BigEndianUnicode
+           }
+           else { [Text.Encoding]::GetEncoding(28591) }
+    $ini = $enc.GetString($iniBytes)
+    $ini = if ($ini -match '(?im)^[^\S\r\n]*Version[^\S\r\n]*=') {
+               $ini -replace '(?im)^[^\S\r\n]*Version[^\S\r\n]*=[^\r\n]*', "Version=$Version"
+           }
+           else { $ini.TrimEnd() + "`r`nVersion=$Version`r`n" }
+    # No GetPreamble here: GetString decodes a UTF-16 BOM into a leading U+FEFF, so the BOM is already
+    # part of $ini and GetBytes re-emits it. Adding the preamble as well writes FF-FE-FF-FE -- measured.
+    [IO.File]::WriteAllBytes($Path, $enc.GetBytes($ini))
+}
+
 function Get-ReportUserRight {
     <#
       Reads every User Rights Assignment out of a Get-GPOReport XML document, as objects carrying the
@@ -358,44 +417,7 @@ if ($changed.Count -gt 0 -or $cse.Added -or $iniVer -ne $curVer) {
     $newVer   = ($userPart -shl 16) -bor $compPart
     Set-ADObject -Identity $gpoDn -Server $pdc -Replace @{ versionNumber = $newVer }
 
-    # Only the Version key is rewritten. Replacing the file wholesale would drop displayName=, which
-    # New-GPO writes -- harmless to clients, since MS-GPOL requires only Version, but there is no reason
-    # to discard a key this script does not own.
-    #
-    # Done over BYTES via codepage 28591 (ISO-8859-1), whose 256 code points map one-to-one onto the 256
-    # byte values, so decode-then-encode returns the original bytes for any single-byte encoding -- which
-    # is what GPMC writes (ANSI). Reading GPT.INI as text and rewriting it as ASCII instead turns a
-    # non-ASCII displayName into question marks, corrupting the very key this is preserving. Only the
-    # Version token is touched, and 'Version' and its digits are the same bytes in every single-byte
-    # encoding.
-    #
-    # UTF-16 is the one case bytes cannot be treated as characters: the key would read as V\0e\0r\0...,
-    # no match, and the else branch would append single-byte text to the end of a UTF-16 file -- a corrupt
-    # GPT.INI, re-corrupted on every subsequent run. So the BOM picks the encoding when there is one.
-    # A UTF-8 BOM needs no special case: its bytes survive the 28591 round trip untouched.
-    #
-    # [^\r\n]* rather than .*$ -- in .NET '.' matches \r and multiline '$' sits before \n, so '.*$' eats
-    # the CR and leaves a lone LF behind on a CRLF file. And [ \t] rather than \s for the leading run,
-    # because \s matches CR and LF too, so '^\s*Version' can start matching on a blank line ABOVE the key
-    # and swallow it.
-    if (Test-Path -LiteralPath $iniPath) {
-        $iniBytes = [IO.File]::ReadAllBytes($iniPath)
-        $enc = if ($iniBytes.Length -ge 2 -and $iniBytes[0] -eq 0xFF -and $iniBytes[1] -eq 0xFE) {
-                   [Text.Encoding]::Unicode
-               }
-               elseif ($iniBytes.Length -ge 2 -and $iniBytes[0] -eq 0xFE -and $iniBytes[1] -eq 0xFF) {
-                   [Text.Encoding]::BigEndianUnicode
-               }
-               else { [Text.Encoding]::GetEncoding(28591) }
-        $ini = $enc.GetString($iniBytes)
-        $ini = if ($ini -match '(?im)^[ \t]*Version[ \t]*=') {
-                   $ini -replace '(?im)^[ \t]*Version[ \t]*=[^\r\n]*', "Version=$newVer"
-               }
-               else { $ini.TrimEnd() + "`r`nVersion=$newVer`r`n" }
-        # No GetPreamble here: GetString decodes a UTF-16 BOM into a leading U+FEFF, so the BOM is already
-        # part of $ini and GetBytes re-emits it. Adding the preamble as well writes FF-FE-FF-FE -- measured.
-        [IO.File]::WriteAllBytes($iniPath, $enc.GetBytes($ini))
-    }
+    if (Test-Path -LiteralPath $iniPath) { Update-GptIniVersion -Path $iniPath -Version $newVer }
     else { Set-Content -LiteralPath $iniPath -Value @('[General]', "Version=$newVer") -Encoding Ascii }
     Write-Host "  version $curVer -> $newVer (computer $($curVer -band 0xFFFF) -> $compPart); GPT.INI and AD agree"
 }

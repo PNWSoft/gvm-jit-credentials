@@ -888,3 +888,135 @@ Describe 'Both logon-rights examples validate the right names they are given' {
         'SeDenyBatchLogonRight'    | Should -Match $pattern
     }
 }
+
+Describe 'GPT.INI version rewrite preserves everything except the Version key' {
+    # GPT.INI is shared domain state, and the Group Policy client reads it with kernel32
+    # GetPrivateProfileInt. Three separate defects lived in this one edit before it was pinned down by
+    # tests: rewriting the file as ASCII mangled a non-ASCII displayName; '.*$' swallowed the CR on a CRLF
+    # file because in .NET '.' matches \r and multiline '$' sits before \n; and treating bytes as
+    # characters appended single-byte text to the end of a UTF-16 file, corrupting it again on every run.
+    # A fourth was introduced by the fix for the second: '[ \t]' skips a form feed or vertical tab that
+    # Windows' INI parser DOES accept before the key, which left a second Version= line behind while the
+    # client kept reading the stale first one.
+    #
+    # The function is extracted from the shipped file so these cannot drift from the code.
+    BeforeAll {
+        $examples = Join-Path (Split-Path $PSScriptRoot -Parent) 'examples'
+        $text = Get-Content (Join-Path $examples 'New-ScanAccountLogonRightsGpo.ps1') -Raw
+        $m = [regex]::Match($text, "(?s)function Update-GptIniVersion \{.*?\n\}")
+        if (-not $m.Success) { throw 'could not extract Update-GptIniVersion from the shipped script' }
+        . ([scriptblock]::Create($m.Value))
+
+        # Latin-1 is a byte-transparent codec: it lets a test assert on exact bytes without caring what
+        # the console or the file system think the encoding is.
+        $script:latin = [Text.Encoding]::GetEncoding(28591)
+        $script:newVer = 65537
+
+        function script:Invoke-Rewrite([byte[]]$InputBytes) {
+            $p = Join-Path ([IO.Path]::GetTempPath()) "gptini-$([guid]::NewGuid()).ini"
+            [IO.File]::WriteAllBytes($p, $InputBytes)
+            try {
+                Update-GptIniVersion -Path $p -Version $script:newVer
+                return [IO.File]::ReadAllBytes($p)
+            }
+            finally { Remove-Item $p -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'rewrites the version and keeps a non-ASCII displayName byte intact (ANSI, CRLF)' {
+        # 0xE9 is e-acute in ANSI. Writing the file back as ASCII turned it into '?', corrupting the very
+        # key the rewrite exists to preserve.
+        $b = [System.Collections.Generic.List[byte]]::new()
+        foreach ($x in $script:latin.GetBytes("[General]`r`nVersion=3`r`ndisplayName=V")) { $b.Add($x) }
+        $b.Add(233)
+        foreach ($x in $script:latin.GetBytes("rsion`r`n")) { $b.Add($x) }
+
+        $out = script:Invoke-Rewrite $b.ToArray()
+        $s = $script:latin.GetString($out)
+        $s | Should -Match "Version=$($script:newVer)"
+        $out | Should -Contain 233
+        $s | Should -Match 'displayName='
+    }
+
+    It 'leaves every CRLF paired' {
+        $out = script:Invoke-Rewrite ($script:latin.GetBytes("[General]`r`nVersion=3`r`nX=y`r`n"))
+        # A lone LF -- any \n not preceded by \r -- is the signature of the '.*$' bug.
+        $script:latin.GetString($out) | Should -Not -Match "[^`r]`n"
+    }
+
+    It 'does not swallow a blank line above the key' {
+        $out = script:Invoke-Rewrite ($script:latin.GetBytes("[General]`r`n`r`nVersion=1`r`n"))
+        $script:latin.GetString($out) | Should -Match "\[General\]`r`n`r`nVersion=$($script:newVer)"
+    }
+
+    It 'rewrites in place when the key is preceded by <Name>, rather than appending a second one' -ForEach @(
+        @{ Name = 'a form feed';    Prefix = "`f" }
+        @{ Name = 'a vertical tab'; Prefix = [string][char]11 }
+        @{ Name = 'spaces';         Prefix = '   ' }
+        @{ Name = 'a tab';          Prefix = "`t" }
+    ) {
+        $out = script:Invoke-Rewrite ($script:latin.GetBytes("[General]`r`n$Prefix" + "Version=5`r`n"))
+        $s = $script:latin.GetString($out)
+        # Exactly one Version key, and it is the new value. Two keys means the client reads the stale one.
+        @([regex]::Matches($s, '(?im)^[^\S\r\n]*Version[^\S\r\n]*=')).Count | Should -Be 1
+        $s | Should -Match "Version=$($script:newVer)"
+        $s | Should -Not -Match 'Version=5'
+    }
+
+    It 'normalises spaces around the equals sign and keeps other keys' {
+        $out = script:Invoke-Rewrite ($script:latin.GetBytes("[General]`r`nVersion  =  7`r`nX=y`r`n"))
+        $s = $script:latin.GetString($out)
+        $s | Should -Match "Version=$($script:newVer)"
+        $s | Should -Match 'X=y'
+    }
+
+    It 'appends the key with CRLF when the file has none' {
+        $out = script:Invoke-Rewrite ($script:latin.GetBytes("[General]`r`ndisplayName=X`r`n"))
+        $script:latin.GetString($out) | Should -Match "displayName=X`r`nVersion=$($script:newVer)`r`n$"
+    }
+
+    It 'rewrites a UTF-16LE file in place, keeping a single BOM' {
+        $u16 = [Text.Encoding]::Unicode
+        $out = script:Invoke-Rewrite ($u16.GetPreamble() + $u16.GetBytes("[General]`r`nVersion=5`r`ndisplayName=X`r`n"))
+
+        $out[0] | Should -Be 0xFF
+        $out[1] | Should -Be 0xFE
+        # FF-FE-FF-FE is what adding GetPreamble on top of an already-decoded BOM produces.
+        "$($out[2])-$($out[3])" | Should -Not -Be '255-254'
+        ($out.Length % 2) | Should -Be 0   # an odd length means single-byte text was appended
+
+        $s = $u16.GetString($out)
+        $s | Should -Match "Version=$($script:newVer)"
+        $s | Should -Not -Match 'Version=5'
+        $s | Should -Match 'displayName=X'
+    }
+
+    It 'keeps a UTF-8 BOM byte-for-byte' {
+        $u8 = [Text.Encoding]::UTF8
+        $out = script:Invoke-Rewrite ($u8.GetPreamble() + $u8.GetBytes("[General]`r`nVersion=9`r`n"))
+        $out[0] | Should -Be 0xEF
+        $out[1] | Should -Be 0xBB
+        $out[2] | Should -Be 0xBF
+        $script:latin.GetString($out) | Should -Match "Version=$($script:newVer)"
+    }
+
+    It 'preserves LF-only line endings rather than converting them' {
+        $out = script:Invoke-Rewrite ($script:latin.GetBytes("[General]`nVersion=2`nX=y`n"))
+        $s = $script:latin.GetString($out)
+        $s | Should -Not -Match "`r"
+        $s | Should -Match "Version=$($script:newVer)"
+    }
+
+    It 'does not add a trailing newline to a file that had none' {
+        $out = script:Invoke-Rewrite ($script:latin.GetBytes("[General]`r`nVersion=2"))
+        $script:latin.GetString($out) | Should -Be "[General]`r`nVersion=$($script:newVer)"
+    }
+
+    It 'does not throw on a <Name>, where the length guards are what stand between it and StrictMode' -ForEach @(
+        @{ Name = '0-byte file';  Bytes = @() }
+        @{ Name = '1-byte file';  Bytes = @(65) }
+    ) {
+        # Indexing [1] of a 1-element array throws under StrictMode; -and must short-circuit first.
+        { script:Invoke-Rewrite ([byte[]]$Bytes) } | Should -Not -Throw
+    }
+}

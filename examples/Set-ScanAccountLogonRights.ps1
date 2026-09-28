@@ -112,8 +112,11 @@ if (-not $Force) {
     # comparison would equal the DOMAIN SID and refuse every legitimate domain account.
     $localDomainSid = $null
     $isDc = $false
-    # -OperationTimeoutSec so a wedged WMI repository becomes the warn-and-skip path below rather than a
-    # script that hangs before doing anything. The guard degrades on error; it must degrade on silence too.
+    # -OperationTimeoutSec so a query that is issued and never completes becomes the warn-and-skip path
+    # below rather than a script that hangs before doing anything. The guard degrades on error; it should
+    # degrade on silence too. Verified honoured for a LOCAL query in 5.1, including over explicit DCOM.
+    # It bounds the operation, not necessarily a connect phase that never answers, so this narrows the
+    # window rather than closing it -- which is the right trade for a check that is advisory anyway.
     try { $isDc = ((Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 15 -ErrorAction Stop).DomainRole -ge 4) }
     catch {
         # Not fatal: $isDc stays false, and the local-account check below either answers or warns. It is
