@@ -10,7 +10,7 @@
 #   The alternative is putting the SSH account in the docker group, which on any Docker host is
 #   root-equivalent -- that account could mount the host filesystem into a container and read
 #   anything. Instead this script is root-owned 0700, and sudoers permits exactly one command:
-#       greenbone-scan ALL=(root) NOPASSWD: /opt/greenbone/gmp-relay.sh
+#       gvm-relay ALL=(root) NOPASSWD: /opt/greenbone/gmp-relay.sh
 #   The SSH account therefore gains the ability to relay GMP requests and nothing else.
 #
 # HOW SECRETS ARE KEPT OFF argv AND OFF DISK
@@ -22,12 +22,14 @@
 #     * mounted read-only, and the whole directory removed on exit via trap
 #
 #   DO NOT chown these to the container's uid. A bind mount does NOT translate uids: chowning to
-#   "the container user" actually hands ownership to whatever HOST account holds that number, which
-#   on a normal Linux box is a real human login. /dev/shm is 1777, so that user can enter the
-#   directory, read both secrets, and -- being the owner -- rewrite req.xml before gvm-cli reads it,
-#   substituting an arbitrary GMP request. Root-owned 0444 inside a 0700 root directory is both
-#   safer and sufficient: the kernel checks the file inode for the container process, which sees the
-#   file through the mount rather than traversing the host directory. VERIFIED working.
+#   "the container user" hands ownership to whatever HOST account holds that number, which on a normal
+#   Linux box is a real login. The original version of this script also chowned the DIRECTORY and left
+#   it 0750, which made both secrets readable by that account and -- since it then owned req.xml --
+#   let it substitute an arbitrary GMP request. Keeping the directory 0700 root blunts a file-only
+#   chown, because the path is not traversable, but there is no reason to chown at all: root-owned
+#   0444 inside a 0700 root directory is both safer and sufficient. The kernel checks the file inode
+#   for the container process, which sees the file through the mount rather than by traversing the host
+#   directory. VERIFIED working.
 #
 #   VERIFIED, do not "simplify" this: gvm-cli does NOT read the request from stdin. Omitting the
 #   positional file gives `TypeError: object of type 'NoneType' has no len()` from gvmtools/cli.py.

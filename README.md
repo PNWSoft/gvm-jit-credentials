@@ -12,7 +12,7 @@ any attempt to use it in the meantime is unambiguous.
 
 ```powershell
 $grant = Grant-GvmScanCredential -Identity gvm-scan -CredentialId $cfg.CredentialId `
-           -ScannerHost scanner@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh
+           -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh
 try     { Start-Sleep $grant.ReplicationDelaySeconds; <run your scan> }
 finally { Revoke-GvmScanCredential -Grant $grant }
 ```
@@ -51,7 +51,7 @@ running.
   the next scan window opens. (Getting this wrong is easy: reusing the value written to AD during
   revoke would leave the scanner holding the account's *current* password, collapsing the two layers
   into one. `tests/Regression.Tests.ps1` pins it.)
-- **The signal for detection becomes unambiguous**, which is the underrated half. A disabled account
+- **The signal for detection becomes unambiguous.** A disabled account
   has no legitimate reason to be used, so an authentication attempt outside the scan window is
   anomalous *by construction* rather than by comparison against a learned baseline — contrast a
   permanently-enabled scan account, where separating malicious use from normal use is genuinely hard.
@@ -128,7 +128,12 @@ running.
    rescued, whereas a DC that still believes the account is disabled rejects outright. Too short a
    wait and the scan falls back to unauthenticated results, which reads as a clean scan rather than a
    failed one.
-3. **Scan** — start a Greenbone task and poll it, or run your own orchestration.
+3. **Scan** — `Invoke-GvmJitScan` composes all of this: grant, wait, start a Greenbone task by UUID,
+   poll to a terminal state, then revoke in a `finally` block. If you build your own targets each run,
+   pass `-ScanAction { ... }` instead of `-TaskId`, and your script block runs inside the same
+   guarantees with `Invoke-GvmGmpRequest` available for its own GMP calls. Use the `Grant`/`Revoke`
+   primitives directly only when you already have orchestration that owns the lifecycle.
+   `-MaxScanMinutes` bounds the poll loop so a hung scan cannot hold the credential open.
 4. **Revoke** — always, in a `finally` block: disable the account, reset the password to a value
    nobody records, overwrite the stored Greenbone value.
 
@@ -222,13 +227,17 @@ claim support for a configuration you haven't run.
 .\bootstrap\Initialize-GvmScanAccount.ps1 -Identity gvm-scan `
     -Path 'OU=Service Accounts,DC=example,DC=local' -RunnerAccount 'EXAMPLE\gvm-runner$' -WhatIf
 
-# 2. Scanner host, AS ROOT: install stub + relay + the scoped sudoers rule
-#    ./host/install.sh    then edit /opt/greenbone/.gmp.env  (chmod 600)
-#    Then pin the runner's SSH key in ~gvm-scan/.ssh/authorized_keys:
+# 2. Scanner host, AS ROOT. Create the Linux account the runner will SSH in as, install the
+#    stub + relay + scoped sudoers rule, then fill in the GMP credentials:
+#      useradd -r -m -s /usr/sbin/nologin gvm-relay
+#      SCAN_ACCOUNT=gvm-relay ./host/install.sh
+#      edit /opt/greenbone/.gmp.env  (chmod 600) — a DEDICATED low-privilege GMP user,
+#      which you create in Greenbone yourself; the bootstrap makes a credential, not a user.
+#    Then pin the runner's key in ~gvm-relay/.ssh/authorized_keys so a stolen key cannot get a shell:
 #      command="/opt/greenbone/gmp.sh",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 ...
 
 # 3. Greenbone side: create the credential object and discover the UUIDs you need
-.\bootstrap\Initialize-GvmScanCredential.ps1 -ScannerHost scanner@scanner.example.local `
+.\bootstrap\Initialize-GvmScanCredential.ps1 -ScannerHost gvm-relay@scanner.example.local `
     -GmpHelper /opt/greenbone/gmp.sh -ScanAccount 'EXAMPLE\gvm-scan' -OutFile .\config.psd1
 
 # 4. Decide how the account gets access on targets — your call.

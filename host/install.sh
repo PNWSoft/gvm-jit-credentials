@@ -12,7 +12,9 @@
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/greenbone}"
-SCAN_ACCOUNT="${SCAN_ACCOUNT:-greenbone-scan}"
+# The LINUX account the Windows runner will SSH in as -- not the AD scan account. Override to
+# match whatever you created: SCAN_ACCOUNT=gvm-relay ./install.sh
+SCAN_ACCOUNT="${SCAN_ACCOUNT:-gvm-relay}"
 SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/gvm-jit-gmp-relay}"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -90,6 +92,6 @@ Next:
        echo '<get_version/>' | ssh -o BatchMode=yes $SCAN_ACCOUNT@THIS_HOST $PREFIX/gmp.sh
 
 If step 2 works but step 3 does not, the sudoers rule or the relay's permissions are wrong.
-If step 3 works but step 4 does not, it is the SSH key or known_hosts of the CALLING account --
-BatchMode ssh fails silently on an unknown host key.
+If step 3 works but step 5 does not, it is the SSH key or known_hosts of the CALLING account --
+with BatchMode, ssh gives no prompt and exits 255 on an unknown host key.
 NEXT

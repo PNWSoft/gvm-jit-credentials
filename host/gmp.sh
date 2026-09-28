@@ -10,9 +10,10 @@
 # while this remains readable and executable by the scan account.
 #
 # RESTRICT THE KEY. This account can run the relay as root, so a stolen SSH key must not yield an
-# interactive shell -- that shell is the starting position for reading /dev/shm, probing the sudo
-# rule, and everything else. Pin the key to this one command in ~/.ssh/authorized_keys; sshd
-# enforces it regardless of what the client asks to run:
+# interactive shell. Such a shell could not read the relay's tmpfs files directly -- that directory is
+# 0700 root -- but it could enumerate the host, probe the sudo rule, and run the relay by hand as often
+# as it liked. Pin the key to this one command in ~/.ssh/authorized_keys; sshd enforces it regardless
+# of what the client asks to run:
 #
 #   command="/opt/greenbone/gmp.sh",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA...
 #

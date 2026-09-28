@@ -6,8 +6,11 @@
   Sets up the Active Directory half of the JIT model:
 
     * a dedicated scan account, created DISABLED, with a password nobody records
-    * delegation so the runner account can enable/disable it and reset its password -- and nothing
-      else, and on that one object only
+    * delegation so the runner account can reset its password and write userAccountControl, on that
+      one object only. Note that userAccountControl carries the enabled bit but also other account
+      flags (DONT_REQUIRE_PREAUTH, PASSWD_NOTREQD and so on), so the runner can set those on this
+      object too. That is strictly weaker than the password-reset right it already holds, but it is
+      more than "enable and disable" and worth knowing.
 
   The delegation is the point. The runner needs to rotate one account's password on demand, which is
   a privileged-sounding capability; granting it against a single object keeps it from being a
@@ -136,11 +139,17 @@ Write-Host "  is visible rather than silent: New-EventLog -LogName Application -
 Write-Host @"
 
 Next:
-  1. Decide how the scan account gets the access it needs ON TARGETS. Authenticated Windows scans
+  1. On the scanner host as root: create the Linux account the runner will SSH in as, run
+     host/install.sh (SCAN_ACCOUNT=<that account>), and fill in .gmp.env with a DEDICATED
+     low-privilege GMP user that you create in Greenbone yourself.
+  2. Give the RUNNER account an SSH key to that Linux account, and populate the RUNNER account's
+     known_hosts -- not yours. With BatchMode, ssh gives no prompt and exits 255 on an unknown host
+     key. For a gMSA that usually means generating the key from a one-shot scheduled task running as
+     the gMSA, since you cannot log on as it.
+  3. Run bootstrap\Initialize-GvmScanCredential.ps1 to create the Greenbone credential object. It
+     talks to the scanner over the SSH path from step 2, so do that first.
+  4. Decide how the scan account gets the access it needs ON TARGETS. Authenticated Windows scans
      need local administrator on each scanned host. See examples/Add-ScanAccountLocalAdmin.ps1 for
      one approach; it is NOT the only one, and the choice is yours.
-  2. Run bootstrap\Initialize-GvmScanCredential.ps1 to create the Greenbone credential object.
-  3. Give the runner account an SSH key to the Greenbone host, and add that host to the RUNNER
-     account's known_hosts -- not yours. BatchMode ssh fails silently on an unknown host key.
-  4. Register the scan task and the backstop task: see examples\.
+  5. Register the scan task AND the backstop task: see examples\.
 "@

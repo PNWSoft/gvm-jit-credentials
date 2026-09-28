@@ -25,7 +25,16 @@
         '*> ''C:\GvmJit\backstop-last-run.log''"')
     Register-ScheduledTask -TaskName 'GVM JIT credential backstop' -Action $action `
         -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 10:30) `
-        -Principal (New-ScheduledTaskPrincipal -UserId 'EXAMPLE\gvm-runner$' -LogonType Password -RunLevel Limited)
+        -Principal (New-ScheduledTaskPrincipal -UserId 'EXAMPLE\gvm-runner$' -LogonType Password -RunLevel Limited) `
+        -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable)
+
+  -StartWhenAvailable is not decoration. A mid-scan REBOOT is the main case this task exists for, and
+  a task without it is simply skipped if the machine is still down at the trigger time -- leaving the
+  account enabled until the following week. With it, the task runs once the machine is back.
+
+  What "independent" does and does not mean here: this is a separate task, so it survives the scan
+  process dying, hanging or being killed. It runs on the same host, under the same account, through
+  the same scheduler, so it is not independent of that host being broken.
 #>
 [CmdletBinding()]
 param(

@@ -21,7 +21,7 @@ Describe 'Invoke-GvmJitScan' {
         Mock -ModuleName GvmJitCredential Grant-GvmScanCredential {
             [pscustomobject]@{
                 Identity = 'scan-acct'; CredentialId = '11111111-2222-3333-4444-555555555555'
-                ScannerHost = 'scanner@host.example.local'; GmpHelper = '/opt/gvm/gmp.sh'
+                ScannerHost = 'gvm-relay@scanner.example.local'; GmpHelper = '/opt/greenbone/gmp.sh'
                 IdentityFile = ''; Server = 'dc1.example.local'
                 LogSource = 'GvmJitCredential'; GrantedAt = (Get-Date)
                 ReplicationDelaySeconds = 0
@@ -34,8 +34,8 @@ Describe 'Invoke-GvmJitScan' {
         $common = @{
             Identity     = 'scan-acct'
             CredentialId = '11111111-2222-3333-4444-555555555555'
-            ScannerHost  = 'scanner@host'
-            GmpHelper    = '/opt/gvm/gmp.sh'
+            ScannerHost  = 'gvm-relay@scanner.example.local'
+            GmpHelper    = '/opt/greenbone/gmp.sh'
             PollSeconds  = 0
         }
     }

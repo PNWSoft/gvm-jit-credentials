@@ -42,7 +42,7 @@ A task cannot follow a changing inventory: GVM refuses to edit a target that is 
   if you need it applied immediately.
 
 .EXAMPLE
-  .\weekly-ou-scan.ps1 -Identity gvm-scan -ScannerHost scanner@scanner.example.local `
+  .\weekly-ou-scan.ps1 -Identity gvm-scan -ScannerHost gvm-relay@scanner.example.local `
       -GmpHelper /opt/greenbone/gmp.sh -CredentialId ... -ConfigId ... -ScannerId ... `
       -PortListId ... -SearchBase 'OU=Servers,DC=EXAMPLE,DC=local' -TargetSubnet '10.0.0.' -WhatIf
 #>

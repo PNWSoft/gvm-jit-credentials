@@ -14,7 +14,9 @@ function Set-JitAccountPassword {
       second grant on the same day fails wherever a minimum age is configured.
 
       A thin seam over Set-ADAccountPassword so the module is testable without a domain. Takes
-      plaintext because both AD and the GMP payload need it; see the README, under "Threat model -- What this does NOT fix".
+      plaintext because both AD and the GMP payload need it; see the README, under "Threat model --
+      What this does NOT fix". Note in particular that if PowerShell Module Logging is enabled, event
+      4103 records this parameter's value, which is outside anything this module can prevent.
     #>
     [CmdletBinding()]
     param(

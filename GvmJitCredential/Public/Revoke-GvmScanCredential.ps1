@@ -33,7 +33,8 @@ function Revoke-GvmScanCredential {
       backstop, where the task SHOULD report failure. Leave it off inside a finally block.
 
     .OUTPUTS
-      A record of what succeeded: Disabled, PasswordReset, GreenboneBlanked, Errors, Warnings.
+      A record of what happened: Identity, Server, Disabled, PasswordReset, GreenboneBlanked, Errors,
+      Warnings and RevokedAt.
       -Strict throws on Errors only. Warnings cover the best-effort Greenbone overwrite, whose
       failure leaves nothing usable behind provided the AD reset succeeded.
 
@@ -43,8 +44,11 @@ function Revoke-GvmScanCredential {
       finally { Revoke-GvmScanCredential -Grant $grant }
 
     .EXAMPLE
-      # Unconditional backstop: no grant record, nothing assumed about the current state.
-      Revoke-GvmScanCredential -Identity greenbone-scan -Strict
+      # Unconditional backstop: no grant record, nothing assumed about the current state. Pass the
+      # scanner details too, or the Greenbone-stored value is left untouched -- the AD reset already
+      # invalidates it, but the stale value sits in the scanner database until the next grant.
+      Revoke-GvmScanCredential -Identity gvm-scan -CredentialId $cfg.CredentialId `
+          -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh -Strict
     #>
     [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'ByIdentity')]
     [OutputType([pscustomobject])]

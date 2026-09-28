@@ -50,12 +50,25 @@
 .PARAMETER AllowedTypes
   Logon types considered normal. Default 3 (Network), which is what an authenticated scan uses.
 
-.PARAMETER ScanWindowStart / ScanWindowEnd
-  Local times bounding the expected scan window, e.g. '01:00' and '06:00'. Only meaningful with
-  -ScanWindowCheck. A window crossing midnight is handled.
+.PARAMETER ScanWindowCheck
+  Also flag type 3 logons falling OUTSIDE the scan window. This is the detection worth alerting on --
+  see WHICH SIGNAL ACTUALLY MATTERS above.
+
+.PARAMETER ScanWindowStart
+  Local time the expected scan window opens, e.g. '01:00'. Only meaningful with -ScanWindowCheck.
+
+.PARAMETER ScanWindowEnd
+  Local time the expected scan window closes, e.g. '06:00'. A window crossing midnight is handled.
+
+.PARAMETER IncludeFailed
+  Also count failed logons (4625) for the account.
+
+.PARAMETER FailedThreshold
+  How many failed logons to tolerate before reporting CRITICAL. Only meaningful with -IncludeFailed.
 
 .EXAMPLE
-  .\Test-ScanAccountLogons.ps1 -Identity gvm-scan -Hours 24 -ScanWindowCheck `
+  # -Hours tracks the CHECK interval, not the scan interval -- see COST above.
+  .\Test-ScanAccountLogons.ps1 -Identity gvm-scan -Hours 1 -ScanWindowCheck `
       -ScanWindowStart '01:00' -ScanWindowEnd '06:00'
 #>
 [CmdletBinding()]

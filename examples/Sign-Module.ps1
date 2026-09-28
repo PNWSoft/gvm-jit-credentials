@@ -30,8 +30,10 @@
   on failure. The certificate never has to touch this machine.
 
 .PARAMETER VerifyWith
-  Which PowerShell parses the signed output: 'powershell' (5.1), 'pwsh' (7.x), or 'both'.
-  Default matches whichever edition is running this script.
+  Which PowerShell parses the signed output: 'powershell' (5.1), 'pwsh' (7.x), 'both' or 'current'.
+  The default is 'current' -- whichever edition is running this script, which is NOT necessarily the
+  one that will run the signed code. If your scheduled tasks use Windows PowerShell 5.1, pass
+  'powershell' or 'both'.
 
 .EXAMPLE
   # Local certificate

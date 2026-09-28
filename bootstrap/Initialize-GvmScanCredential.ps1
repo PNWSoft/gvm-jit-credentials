@@ -19,7 +19,7 @@
   GMP user can modify it.
 
 .PARAMETER ScannerHost
-  SSH login for the Greenbone host, e.g. "scanner@scanner.example.local".
+  SSH login for the Greenbone host, e.g. "gvm-relay@scanner.example.local".
 
 .PARAMETER GmpHelper
   Path to gmp.sh on that host, e.g. "/opt/greenbone/gmp.sh".
@@ -28,11 +28,19 @@
   The Windows/AD account the scan will authenticate as, in DOMAIN\user form. Stored as the
   credential's login; only the password is rotated per scan.
 
+.PARAMETER CredentialName
+  Display name for the Greenbone credential object. Re-running with a name that already exists reports
+  that object's UUID instead of creating a duplicate, which is what makes this script idempotent.
+
+.PARAMETER IdentityFile
+  Explicit SSH private key for $ScannerHost. Omit it only if the calling account's own ~/.ssh already
+  holds a key authorised for that host.
+
 .PARAMETER OutFile
   Write the generated config here instead of only printing it.
 
 .EXAMPLE
-  .\Initialize-GvmScanCredential.ps1 -ScannerHost scanner@scanner.example.local `
+  .\Initialize-GvmScanCredential.ps1 -ScannerHost gvm-relay@scanner.example.local `
       -GmpHelper /opt/greenbone/gmp.sh -ScanAccount 'EXAMPLE\gvm-scan' -OutFile ..\config.psd1
 #>
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'CredentialName',

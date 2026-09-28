@@ -5,7 +5,7 @@
     Identity     = 'gvm-scan'                     # sAMAccountName only, no domain prefix
     CredentialId = '00000000-0000-0000-0000-000000000000'
 
-    ScannerHost  = 'scanner@scanner.example.local'
+    ScannerHost  = 'gvm-relay@scanner.example.local'
     GmpHelper    = '/opt/greenbone/gmp.sh'
 
     # Name the SSH key explicitly. Without it, ssh uses the CALLING account's profile, so the same

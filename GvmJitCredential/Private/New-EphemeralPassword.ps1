@@ -14,7 +14,9 @@ function New-EphemeralPassword {
       This returns a [string], not a SecureString, because Set-ADAccountPassword and the GMP
       payload both need the plaintext anyway. See the README, under "Threat model -- What this does NOT fix": .NET strings are
       immutable and are not zeroed, so the value exists in process memory until collected.
-      Do NOT enable PowerShell transcription for the account that runs this.
+      Do NOT enable PowerShell transcription OR Module Logging for the account that runs this. Both
+      capture the value from outside this module, and Module Logging is the easier one to have on
+      without realising: event 4103 records parameter values, including this one.
     #>
     [CmdletBinding()]
     [OutputType([string])]

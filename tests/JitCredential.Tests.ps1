@@ -105,8 +105,8 @@ Describe 'Grant-GvmScanCredential' {
         $common = @{
             Identity     = 'scan-acct'
             CredentialId = '11111111-2222-3333-4444-555555555555'
-            ScannerHost  = 'scanner@scanner.example.local'
-            GmpHelper    = '/opt/gvm/gmp.sh'
+            ScannerHost  = 'gvm-relay@scanner.example.local'
+            GmpHelper    = '/opt/greenbone/gmp.sh'
         }
     }
 
@@ -192,7 +192,7 @@ Describe 'Revoke-GvmScanCredential' {
     It 'accepts a grant record with extra properties' {
         $grant = [pscustomobject]@{
             Identity = 'scan-acct'; CredentialId = '11111111-2222-3333-4444-555555555555'
-            ScannerHost = 'scanner@host.example.local'; GmpHelper = '/opt/gvm/gmp.sh'
+            ScannerHost = 'gvm-relay@scanner.example.local'; GmpHelper = '/opt/greenbone/gmp.sh'
             Server = 'dc1.example.local'; LogSource = 'GvmJitCredential'
             GrantedAt = (Get-Date); ReplicationDelaySeconds = 45
         }
@@ -214,7 +214,7 @@ Describe 'Revoke-GvmScanCredential' {
         # The AD reset has already invalidated the stored value, so this is belt-and-braces.
         Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'unreachable' }
         $r = Revoke-GvmScanCredential -Identity 'scan-acct' -CredentialId '11111111-2222-3333-4444-555555555555' `
-                -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh'
+                -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh'
         $r.PasswordReset    | Should -BeTrue
         $r.GreenboneBlanked | Should -BeFalse
     }

@@ -21,7 +21,7 @@ function Invoke-GvmJitScan {
       That is not a hypothetical -- it is the normal outcome of a reboot during a long scan. Deploy
       the independent backstop as well (examples/backstop-task.ps1): a scheduled task that calls
       Revoke-GvmScanCredential unconditionally, timed to fire after your longest plausible scan.
-      Belt and braces, because the belt is a single process.
+      A finally block cannot outlive its own process, so the backstop is the only thing covering those.
 
     .PARAMETER TaskId
       UUID of an existing Greenbone task to start and poll.
@@ -39,13 +39,13 @@ function Invoke-GvmJitScan {
       A result record: Status, TaskId, ReportId, StartedAt, FinishedAt, Duration, Revoke.
 
     .EXAMPLE
-      Invoke-GvmJitScan -Identity greenbone-scan -CredentialId $cfg.CredentialId -TaskId $cfg.TaskId `
-          -ScannerHost scanner@scanner.example.local -GmpHelper /opt/gvm/gmp.sh
+      Invoke-GvmJitScan -Identity gvm-scan -CredentialId $cfg.CredentialId -TaskId $cfg.TaskId `
+          -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh
 
     .EXAMPLE
       # Bring your own orchestration: build a fresh target and task from current inventory.
-      Invoke-GvmJitScan -Identity greenbone-scan -CredentialId $cfg.CredentialId `
-          -ScannerHost scanner@scanner.example.local -GmpHelper /opt/gvm/gmp.sh `
+      Invoke-GvmJitScan -Identity gvm-scan -CredentialId $cfg.CredentialId `
+          -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh `
           -ScanAction { param($grant) New-MyDailyTarget; Start-MyTask -Wait }
     #>
     [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'ByTaskId')]

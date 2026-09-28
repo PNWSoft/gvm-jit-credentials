@@ -19,7 +19,7 @@ function Invoke-GvmGmpRequest {
       202 to start_task, so pass those explicitly when you use them.
 
     .EXAMPLE
-      $doc = Invoke-GvmGmpRequest -Xml '<get_version/>' -ScannerHost scanner@host -GmpHelper /opt/gvm/gmp.sh
+      $doc = Invoke-GvmGmpRequest -Xml '<get_version/>' -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh
 
     .EXAMPLE
       $doc = Invoke-GvmGmpRequest -ScannerHost $h -GmpHelper $g -ExpectStatus 200,201 `

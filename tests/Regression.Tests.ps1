@@ -32,7 +32,7 @@ Describe 'Revoke does not hand Greenbone a working password' {
         # password, so the only thing stopping its use was the account being disabled -- one layer,
         # not two, and exactly the standing-credential problem the module claims to remove.
         $null = Revoke-GvmScanCredential -Identity 'scan-acct' -CredentialId '11111111-2222-3333-4444-555555555555' `
-                    -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh'
+                    -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh'
 
         $script:adPassword | Should -Not -BeNullOrEmpty
         $script:gmpBody    | Should -Not -BeNullOrEmpty
@@ -42,7 +42,7 @@ Describe 'Revoke does not hand Greenbone a working password' {
     It 'does not treat a failed Greenbone overwrite as an error, because the AD reset already invalidated it' {
         Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'scanner unreachable' }
         $r = Revoke-GvmScanCredential -Identity 'scan-acct' -CredentialId '11111111-2222-3333-4444-555555555555' `
-                -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh'
+                -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh'
         $r.PasswordReset    | Should -BeTrue
         $r.GreenboneBlanked | Should -BeFalse
         $r.Warnings.Count   | Should -BeGreaterThan 0
@@ -52,7 +52,7 @@ Describe 'Revoke does not hand Greenbone a working password' {
     It '-Strict does not throw when only the Greenbone overwrite failed' {
         Mock -ModuleName GvmJitCredential Invoke-GmpRequest { throw 'scanner unreachable' }
         { Revoke-GvmScanCredential -Identity 'scan-acct' -CredentialId '11111111-2222-3333-4444-555555555555' `
-              -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh' -Strict } | Should -Not -Throw
+              -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' -Strict } | Should -Not -Throw
     }
 
     It '-Strict DOES throw when the AD password reset failed' {
@@ -80,8 +80,8 @@ Describe 'Grant leaves nothing enabled when it fails' {
         $common = @{
             Identity     = 'scan-acct'
             CredentialId = '11111111-2222-3333-4444-555555555555'
-            ScannerHost  = 'scanner@host'
-            GmpHelper    = '/opt/gvm/gmp.sh'
+            ScannerHost  = 'gvm-relay@scanner.example.local'
+            GmpHelper    = '/opt/greenbone/gmp.sh'
         }
     }
 
@@ -121,8 +121,8 @@ Describe 'Invoke-GvmJitScan survives a failing Grant' {
         $common = @{
             Identity     = 'scan-acct'
             CredentialId = '11111111-2222-3333-4444-555555555555'
-            ScannerHost  = 'scanner@host'
-            GmpHelper    = '/opt/gvm/gmp.sh'
+            ScannerHost  = 'gvm-relay@scanner.example.local'
+            GmpHelper    = '/opt/greenbone/gmp.sh'
             PollSeconds  = 0
         }
     }
@@ -142,7 +142,7 @@ Describe 'Invoke-GmpRequest' {
     It 'rejects a response whose status is not expected' {
         InModuleScope GvmJitCredential {
             function ssh { '<modify_credential_response status="400" status_text="Bogus"/>' }
-            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh' } |
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' } |
                 Should -Throw '*status=400*'
         }
     }
@@ -150,7 +150,7 @@ Describe 'Invoke-GmpRequest' {
     It 'accepts a status listed in -ExpectStatus' {
         InModuleScope GvmJitCredential {
             function ssh { '<start_task_response status="202"/>' }
-            $d = Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh' -ExpectStatus @('200','202')
+            $d = Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' -ExpectStatus @('200','202')
             $d.DocumentElement.GetAttribute('status') | Should -Be '202'
         }
     }
@@ -159,7 +159,7 @@ Describe 'Invoke-GmpRequest' {
         InModuleScope GvmJitCredential {
             # Regex-matching the raw text for status="200" would read this as success.
             function ssh { '<get_tasks_response status="400" status_text="Failed"><note>status="200"</note></get_tasks_response>' }
-            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh' } |
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' } |
                 Should -Throw '*status=400*'
         }
     }
@@ -167,7 +167,7 @@ Describe 'Invoke-GmpRequest' {
     It 'reports unparseable output rather than pretending it succeeded' {
         InModuleScope GvmJitCredential {
             function ssh { 'docker: command not found' }
-            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh' } |
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' } |
                 Should -Throw '*unparseable*'
         }
     }
@@ -175,14 +175,14 @@ Describe 'Invoke-GmpRequest' {
     It 'names the ssh failure when there is no output at all' {
         InModuleScope GvmJitCredential {
             function ssh { $global:LASTEXITCODE = 255; '' }
-            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh' } |
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' } |
                 Should -Throw '*No response from the GMP helper*'
         }
     }
 
     It 'fails fast on a missing IdentityFile instead of an opaque ssh error' {
         InModuleScope GvmJitCredential {
-            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh' -IdentityFile 'C:\nope\missing_key' } |
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' -IdentityFile 'C:\nope\missing_key' } |
                 Should -Throw '*IdentityFile not found*'
         }
     }
@@ -202,7 +202,7 @@ Describe 'Public GMP surface for -ScanAction callers' {
 
     It 'passes ExpectStatus through, so create_* returning 201 is accepted' {
         Mock -ModuleName GvmJitCredential Invoke-GmpRequest { [xml]'<create_target_response status="201" id="t-1"/>' }
-        $d = Invoke-GvmGmpRequest -Xml '<create_target/>' -ScannerHost 'scanner@host.example.local' -GmpHelper '/opt/gvm/gmp.sh' -ExpectStatus 200, 201
+        $d = Invoke-GvmGmpRequest -Xml '<create_target/>' -ScannerHost 'gvm-relay@scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' -ExpectStatus 200, 201
         $d.DocumentElement.GetAttribute('id') | Should -Be 't-1'
         Should -Invoke -ModuleName GvmJitCredential Invoke-GmpRequest `
             -ParameterFilter { $ExpectStatus -contains '201' }
@@ -226,7 +226,7 @@ Describe 'ScanAction scope contract' {
     It 'can read variables from the scope that defined it' {
         $outerValue = 'VISIBLE'
         $script:readBack = 'NOT-SET'
-        $null = Invoke-GvmJitScan -Identity a -CredentialId '11111111-2222-3333-4444-555555555555' -ScannerHost scanner@host.example.local -GmpHelper /opt/gvm/gmp.sh `
+        $null = Invoke-GvmJitScan -Identity a -CredentialId '11111111-2222-3333-4444-555555555555' -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh `
                     -ReplicationDelaySeconds 0 -ScanAction { $script:readBack = $outerValue }
         $script:readBack | Should -Be 'VISIBLE'
     }
@@ -234,7 +234,7 @@ Describe 'ScanAction scope contract' {
     It 'can read an array and preserve its contents' {
         $hosts = @('10.0.0.1', '10.0.0.2', '10.0.0.3')
         $script:joined = ''
-        $null = Invoke-GvmJitScan -Identity a -CredentialId '11111111-2222-3333-4444-555555555555' -ScannerHost scanner@host.example.local -GmpHelper /opt/gvm/gmp.sh `
+        $null = Invoke-GvmJitScan -Identity a -CredentialId '11111111-2222-3333-4444-555555555555' -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh `
                     -ReplicationDelaySeconds 0 -ScanAction { $script:joined = $hosts -join ',' }
         $script:joined | Should -Be '10.0.0.1,10.0.0.2,10.0.0.3'
     }
@@ -248,7 +248,7 @@ Describe 'Input validation at the boundary' {
         # green test, absent defence. Stub ssh too, so no fallback can supply the exception.
         InModuleScope GvmJitCredential {
             function ssh { '<r status="200"/>' }
-            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost '-oProxyCommand=calc' -GmpHelper '/opt/gvm/gmp.sh' } |
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost '-oProxyCommand=calc' -GmpHelper '/opt/greenbone/gmp.sh' } |
                 Should -Throw -ExceptionType ([System.Management.Automation.ParameterBindingException])
         }
     }
@@ -256,7 +256,7 @@ Describe 'Input validation at the boundary' {
     It 'still accepts a bare hostname with no user@ (ssh_config User directive)' {
         InModuleScope GvmJitCredential {
             function ssh { '<get_version_response status="200"/>' }
-            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'scanner.example.local' -GmpHelper '/opt/gvm/gmp.sh' } |
+            { Invoke-GmpRequest -Xml '<x/>' -ScannerHost 'scanner.example.local' -GmpHelper '/opt/greenbone/gmp.sh' } |
                 Should -Not -Throw
         }
     }
@@ -275,7 +275,7 @@ Describe 'Input validation at the boundary' {
         # binding exception specifically.
         Mock -ModuleName GvmJitCredential Resolve-JitDomainController { 'dc1.example.local' }
         { Grant-GvmScanCredential -Identity a -CredentialId 'not-a-uuid' `
-              -ScannerHost 'a@b' -GmpHelper '/opt/gvm/gmp.sh' -WhatIf } |
+              -ScannerHost 'a@b' -GmpHelper '/opt/greenbone/gmp.sh' -WhatIf } |
             Should -Throw -ExceptionType ([System.Management.Automation.ParameterBindingException])
     }
 

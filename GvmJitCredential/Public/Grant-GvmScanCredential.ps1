@@ -27,20 +27,21 @@ function Grant-GvmScanCredential {
       the process being killed, or the machine rebooting mid-scan.
 
     .PARAMETER Identity
-      sAMAccountName of the dedicated scan account, e.g. "greenbone-scan".
+      sAMAccountName of the dedicated scan account, e.g. "gvm-scan".
 
     .PARAMETER CredentialId
       UUID of the Greenbone credential object to push the password into. Get it from
       bootstrap/Initialize-GvmScanCredential.ps1.
 
     .OUTPUTS
-      A grant record (Identity, CredentialId, Server, GrantedAt) to pass to
-      Revoke-GvmScanCredential as -Grant. It deliberately does NOT contain the password.
-      It is a PSCustomObject, so it cannot be splatted -- use -Grant, not @grant.
+      A grant record to pass to Revoke-GvmScanCredential as -Grant: Identity, CredentialId,
+      ScannerHost, GmpHelper, IdentityFile, Server, LogSource, GrantedAt and ReplicationDelaySeconds.
+      It deliberately does NOT contain the password. It is a PSCustomObject, so it cannot be
+      splatted -- use -Grant, not @grant.
 
     .EXAMPLE
-      $grant = Grant-GvmScanCredential -Identity greenbone-scan -CredentialId $cfg.CredentialId `
-                 -ScannerHost scanner@scanner.example.local -GmpHelper /opt/gvm/gmp.sh
+      $grant = Grant-GvmScanCredential -Identity gvm-scan -CredentialId $cfg.CredentialId `
+                 -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh
       try { Start-MyScan } finally { Revoke-GvmScanCredential -Grant $grant }
     #>
     [CmdletBinding(SupportsShouldProcess)]
