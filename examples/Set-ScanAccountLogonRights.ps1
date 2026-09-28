@@ -55,6 +55,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$Identity,
+    [switch]$Force,
     [string[]]$DenyRight = @(
         'SeDenyInteractiveLogonRight',        # Deny log on locally
         'SeDenyRemoteInteractiveLogonRight',  # Deny log on through Remote Desktop Services
@@ -81,9 +82,65 @@ $sid = (New-Object Security.Principal.NTAccount($Identity)).Translate(
             [Security.Principal.SecurityIdentifier]).Value
 Write-Host "$Identity resolves to $sid"
 
+if (-not $Force) {
+    # 'Everyone' (S-1-1-0), 'BUILTIN\Administrators' (S-1-5-32-544) and 'Authenticated Users' (S-1-5-11)
+    # all translate perfectly well from a name. Denying them these rights would lock this machine's
+    # administrators out of it. Domain SIDs only.
+    if ($sid -notmatch '^S-1-5-21-') {
+        throw "$Identity resolves to the well-known SID $sid, not a domain account. Refusing (-Force overrides)."
+    }
+    # Best effort, and only best effort: this script must still work on a host that cannot reach a DC at
+    # this moment. The prefix test above already covers the dangerous well-known SIDs; this catches a
+    # domain GROUP or a managed service account, which the prefix test cannot.
+    try {
+        $cls = ([ADSI]"LDAP://<SID=$sid>").SchemaClassName
+        if ($cls -and $cls -ne 'user') {
+            throw ("$Identity is a '$cls', not a user. Denying these rights to a group or managed " +
+                   'service account has a blast radius nobody intends -- and a gMSA is normally the ' +
+                   'RUNNER, which needs batch logon. Refusing (-Force overrides).')
+        }
+        Write-Host '  confirmed: a domain user object'
+    }
+    catch [System.Management.Automation.RuntimeException] { throw }
+    catch { Write-Warning "  could not confirm the object class ($($_.Exception.Message)); continuing on the SID prefix alone" }
+}
+
+function Add-PrivilegeRightMember {
+    <#
+      Adds $Sid to $Right in a List[string] holding a security template, returning what it did.
+
+      Index-based, and exact on membership, for two reasons learnt the hard way. Editing a string ARRAY
+      with -replace makes the first insert produce an element with an embedded newline, after which an
+      anchored header pattern no longer matches it and later inserts silently do nothing. And a substring
+      test for the SID reports "already present" when an existing member merely STARTS with it --
+      '*S-1-...-1105' is a substring of '*S-1-...-11050' -- so nothing gets written.
+    #>
+    param(
+        [Parameter(Mandatory)][System.Collections.Generic.List[string]]$Lines,
+        [Parameter(Mandatory)][string]$Right,
+        [Parameter(Mandatory)][string]$Sid
+    )
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match "^\s*$Right\s*=\s*(.*)$") {
+            $members = $Matches[1].Trim()
+            $have = @($members -split ',' | ForEach-Object { $_.Trim().TrimStart('*') })
+            if ($have -contains $Sid) { return 'present' }
+            # Existing members are carried across: a template REPLACES the membership of any right it
+            # names, so dropping them would silently revoke those holders.
+            $Lines[$i] = "$Right = $members,*$Sid"
+            return 'appended'
+        }
+    }
+    $Lines.Add("$Right = *$Sid")
+    return 'created'
+}
+
 function Export-UserRightsPolicy {
     param([string]$Path)
-    $out = & secedit /export /areas USER_RIGHTS /cfg $Path 2>&1
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & secedit /export /areas USER_RIGHTS /cfg $Path 2>&1 }
+    finally { $ErrorActionPreference = $prevEap }
     if (-not (Test-Path -LiteralPath $Path)) { throw "secedit /export produced nothing: $out" }
     # secedit writes UTF-16. Reading is fine either way; WRITING it back as anything else produces a
     # file secedit silently declines to apply, which looks like the change being ignored.
@@ -95,23 +152,27 @@ $sdb = [IO.Path]::ChangeExtension($inf, 'sdb')
 $log = [IO.Path]::ChangeExtension($inf, 'log')
 
 try {
-    $lines = Export-UserRightsPolicy -Path $inf
+    $exported = Export-UserRightsPolicy -Path $inf
+
+    # A MINIMAL template is submitted, holding only the four target rights with their full current
+    # membership -- not the whole export. secedit /export lists every right as the EFFECTIVE policy, so
+    # re-importing it would bake rights currently granted by a GPO into local policy, where they then
+    # survive that GPO's removal. Applying only what is being changed avoids that side effect entirely.
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($l in '[Unicode]', 'Unicode=yes', '[Version]', 'signature="$CHICAGO$"', 'Revision=1', '[Privilege Rights]') {
+        $lines.Add($l)
+    }
+    foreach ($right in $DenyRight) {
+        $cur = @($exported) | Where-Object { $_ -match "^\s*$right\s*=" } | Select-Object -First 1
+        if ($cur) { $lines.Add(($cur -replace '^\s+', '')) }
+    }
 
     $changes = [System.Collections.Generic.List[string]]::new()
     foreach ($right in $DenyRight) {
-        $existing = $lines | Where-Object { $_ -match "^\s*$right\s*=" } | Select-Object -First 1
-        if (-not $existing) {
-            # Right not present at all: create it under [Privilege Rights] with just this account.
-            $lines = $lines -replace '(?m)^(\[Privilege Rights\])\s*$', "`$1`r`n$right = *$sid"
-            $changes.Add("$right : created, added $Identity")
-        }
-        elseif ($existing -match [regex]::Escape($sid)) {
-            Write-Host "  already set: $right"
-        }
-        else {
-            # Append, keeping every existing member: secedit replaces the whole membership list.
-            $lines = $lines -replace ("(?m)^(\s*$right\s*=\s*.*)$"), "`$1,*$sid"
-            $changes.Add("$right : added $Identity")
+        switch (Add-PrivilegeRightMember -Lines $lines -Right $right -Sid $sid) {
+            'present'  { Write-Host "  already set: $right" }
+            'appended' { $changes.Add("$right : added $Identity, keeping existing members") }
+            'created'  { $changes.Add("$right : created with $Identity") }
         }
     }
 
@@ -125,8 +186,14 @@ try {
 
     if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Apply $($changes.Count) user-rights change(s)")) { return }
 
-    Set-Content -LiteralPath $inf -Value $lines -Encoding Unicode
-    $out = & secedit /configure /db $sdb /cfg $inf /areas USER_RIGHTS /log $log /quiet 2>&1
+    Set-Content -LiteralPath $inf -Value $lines.ToArray() -Encoding Unicode
+    # EAP localised to Continue: in 5.1 a native command writing to stderr raises a terminating
+    # NativeCommandError under 'Stop', which would abort before the exit code and the log tail below --
+    # the two things that say what went wrong.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & secedit /configure /db $sdb /cfg $inf /areas USER_RIGHTS /log $log /quiet 2>&1 }
+    finally { $ErrorActionPreference = $prevEap }
     if ($LASTEXITCODE -ne 0) {
         if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | Select-Object -Last 20 | ForEach-Object { Write-Host "  $_" } }
         throw "secedit /configure exited $LASTEXITCODE. $out"
@@ -140,13 +207,22 @@ try {
         Write-Host "`nVerification:"
         $bad = 0
         foreach ($right in $DenyRight) {
-            $line = $after | Where-Object { $_ -match "^\s*$right\s*=" } | Select-Object -First 1
-            if ($line -and $line -match [regex]::Escape($sid)) { Write-Host "  OK   $right" -ForegroundColor Green }
+            $line = $after | Where-Object { $_ -match "^\s*$right\s*=\s*(.*)$" } | Select-Object -First 1
+            $holds = $false
+            if ($line -and $line -match "^\s*$right\s*=\s*(.*)$") {
+                # Exact member comparison, for the same reason as the merge above.
+                $holds = @($Matches[1] -split ',' | ForEach-Object { $_.Trim().TrimStart('*') }) -contains $sid
+            }
+            if ($holds) { Write-Host "  OK   $right" -ForegroundColor Green }
             else { Write-Host "  FAIL $right does not list $Identity" -ForegroundColor Red; $bad++ }
         }
         # The invariant that matters more than any of the above.
-        $net = $after | Where-Object { $_ -match '^\s*SeDenyNetworkLogonRight\s*=' } | Select-Object -First 1
-        if ($net -and $net -match [regex]::Escape($sid)) {
+        $net = $after | Where-Object { $_ -match '^\s*SeDenyNetworkLogonRight\s*=\s*(.*)$' } | Select-Object -First 1
+        $netHolds = $false
+        if ($net -and $net -match '^\s*SeDenyNetworkLogonRight\s*=\s*(.*)$') {
+            $netHolds = @($Matches[1] -split ',' | ForEach-Object { $_.Trim().TrimStart('*') }) -contains $sid
+        }
+        if ($netHolds) {
             Write-Host '  FAIL SeDenyNetworkLogonRight now lists the account -- scanning WILL break' -ForegroundColor Red
             $bad++
         }

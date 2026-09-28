@@ -422,12 +422,12 @@ What the suite does **not** cover: there are no tests for the shell in `host/`, 
 `exit 2` for a failed grant rollback is asserted at the module level rather than through a child
 process. The rest of the exit-code contract runs as a real child process against a stub module.
 
-`New-ScanAccountLogonRightsGpo.ps1` is the one script here whose write path has not been run: creating a
-GPO, writing its security template and bumping its version needs domain-level rights and would leave a
-real GPO behind. What *was* verified against a live domain is its read path and that its merge is
-idempotent -- pointed at an existing GPO it correctly reports nothing to change -- plus its template
-merge, version arithmetic and file encoding, each checked against the template of a GPO known to work.
-Treat the write path as reviewed rather than proven, and run it with `-WhatIf` first.
+`New-ScanAccountLogonRightsGpo.ps1` authors a GPO's security template directly, because no cmdlet can:
+User Rights Assignment is not registry policy. That means three things it has to get right, each of which
+fails **silently** on its own — a UTF-16LE template with a BOM, a version bumped in both GPT.INI and the
+directory object, and the Security client-side extension registered in `gPCMachineExtensionNames` with the
+groups **sorted by CSE GUID** (MS-GPOL 2.2.4: processing stops at the first one out of order, so appending
+without sorting disables every extension from that point on). Run it with `-WhatIf` first.
 
 That is not a claim of correctness — it is a statement that nothing here is untried, which for this
 kind of tool is the minimum bar. It supports one configuration for the same reason.
