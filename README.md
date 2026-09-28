@@ -4,11 +4,20 @@
 
 Just-in-time credentials for authenticated Greenbone / OpenVAS scans.
 
+Authenticated vulnerability scanning normally needs a standing Active Directory account, with local
+administrator rights on every target, holding the same password all year. This is a PowerShell module
+and a working reference deployment that removes the standing part, by driving credential rotation from
+the scan schedule rather than from a password policy.
+
 The scan account is **disabled**, with a password nobody holds, except during a scan. For the scan
 window it is enabled and its password rotated to a fresh random value; afterwards both are undone.
 The goal is narrow: to make that account **useless outside the scan window**, so that a stolen
 credential authenticates nowhere — then or later, because the next window uses a fresh value, not
 this one — and so that any attempt to use it is unambiguous.
+
+It is a sample to read and adapt, taken from a deployment that runs weekly — not a product. It does
+not reduce what the account can do *while* a scan is running; see [Threat model](#threat-model) and
+[Scope](#scope) for what it does and does not buy.
 
 ```powershell
 $grant = Grant-GvmScanCredential -Identity gvm-scan -CredentialId $cfg.CredentialId `
@@ -445,6 +454,52 @@ without sorting disables every extension from that point on). Run it with `-What
 
 That is not a claim of correctness — it is a statement that nothing here is untried, which for this
 kind of tool is the minimum bar. It supports one configuration for the same reason.
+
+## Questions people actually ask
+
+**Does this work with OpenVAS, or only Greenbone Community Edition?**
+Either. The module talks GMP, the Greenbone Management Protocol, so it does not care which
+distribution serves it. The reference relay on the scanner runs `gvm-cli` inside the Community
+Edition's Docker Compose project; `COMPOSE_DIR` and the service name are both overridable, and the
+relay is a short shell script to rewrite if your scanner is not Dockerised.
+
+**Does the scan account need Domain Admin?**
+No, and it should not have it. It needs local administrator on the *targets* — that is what an
+authenticated scan requires to read the registry and installed-software inventory — and nothing in
+Active Directory beyond existing. Domain controllers are deliberately excluded from scope, because
+local administrator on a DC *is* domain administrator; see [Domain controllers](#domain-controllers).
+
+**Why not just use a gMSA for the scan account?**
+Because a gMSA's whole value is that its password never leaves Active Directory, and an authenticated
+SMB scan needs the password handed to the scanner. A gMSA fits the *runner* — the account that
+executes the scheduled task — and that is what the examples use. See the discussion under
+[Why](#why).
+
+**What happens if the scan crashes, or the machine reboots mid-window?**
+That is what the backstop task is for: it re-runs the revoke independently, so a killed process or a
+reboot does not leave the account enabled. Both entry points are in `examples/`, and the exit codes
+are documented so a scheduler can tell a clean revoke from a partial one.
+
+**Does it need WinRM or PowerShell remoting?**
+No. The runner reaches the scanner over SSH to a single pinned command, and the AD work happens
+locally. The local-administrator example applies group membership by Group Policy rather than by
+remoting into each host.
+
+**Windows PowerShell 5.1, or PowerShell 7?**
+The manifest declares 5.1, which is what the deployment it came from runs, and the tests are executed
+on it. Nothing in the module is 5.1-only, but 5.1 is the version the behaviour has been verified
+against — including several places where 5.1 and 7 genuinely differ.
+
+**Does it handle more than one domain?**
+Not by itself. The domain controller is discovered as the PDC emulator of the domain the runner is a
+member of, so a multi-domain forest needs one scheduled task per domain rather than one task that
+crosses trusts. The GPO sample refuses a `-Identity` that names a different domain instead of
+silently restricting a same-named account in the wrong one.
+
+**Is the password ever written to disk or visible in a process list?**
+Not by design, and the threat model states the residual honestly: it is passed to `gvm-cli` through
+files on `tmpfs` rather than on the command line, and scanner error text is redacted before it reaches
+a log. What the scanner does with the credential once it holds it is outside this tool's control.
 
 ## License
 
