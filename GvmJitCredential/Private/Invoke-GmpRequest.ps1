@@ -62,9 +62,10 @@ function Invoke-GmpRequest {
     # '-oProxyCommand=...' as an invalid hostname rather than honouring it.
     $sshArgs += @('--', $ScannerHost, $GmpHelper)
 
-    # STDERR goes to a file rather than $null. BatchMode=yes makes ssh fail SILENTLY on a missing
-    # key or an unknown host key, so discarding stderr turns "Host key verification failed" into
-    # an empty response and sends you hunting in the wrong place.
+    # STDERR goes to a file rather than $null. With BatchMode=yes ssh gives no prompt and writes its
+    # reason only to stderr, so discarding it turns "Host key verification failed" into an empty
+    # response and sends you hunting in the wrong place. Capturing it is what lets this module report
+    # the actual cause.
     $errFile = [System.IO.Path]::GetTempFileName()
     $prev = $ErrorActionPreference
     # In PS 5.1 a native command writing to STDERR raises a terminating NativeCommandError when

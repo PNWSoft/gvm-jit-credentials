@@ -6,7 +6,8 @@
   Register this as a scheduled task running as your runner account. That account needs:
     * the delegated rights from bootstrap\Initialize-GvmScanAccount.ps1
     * an SSH key to the Greenbone host, IN ITS OWN PROFILE
-    * the Greenbone host in ITS OWN known_hosts (BatchMode ssh fails silently otherwise)
+    * the Greenbone host in ITS OWN known_hosts -- with BatchMode, ssh gives no prompt and exits
+      255; this module reports that, but anything calling raw ssh will not
 
   Register with (adjust paths, account and schedule):
 

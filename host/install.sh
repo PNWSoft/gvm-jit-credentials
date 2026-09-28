@@ -12,9 +12,11 @@
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/greenbone}"
-# The LINUX account the Windows runner will SSH in as -- not the AD scan account. Override to
-# match whatever you created: SCAN_ACCOUNT=gvm-relay ./install.sh
-SCAN_ACCOUNT="${SCAN_ACCOUNT:-gvm-relay}"
+# The LINUX account the Windows runner SSHes in as -- NOT the AD scan account, which never logs in
+# here. Override to match whatever you created: RELAY_ACCOUNT=gvm-relay ./install.sh
+# SCAN_ACCOUNT is accepted as a deprecated alias.
+RELAY_ACCOUNT="${RELAY_ACCOUNT:-${SCAN_ACCOUNT:-gvm-relay}}"
+SCAN_ACCOUNT="$RELAY_ACCOUNT"
 SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/gvm-jit-gmp-relay}"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -32,9 +34,16 @@ echo "  installed $PREFIX/gmp.sh (0755) and $PREFIX/gmp-relay.sh (0700 root)"
 # Rewriting only the first left a relay that could not read its own credentials file and failed every
 # request with "cannot read /opt/greenbone/.gmp.env".
 if [ "$PREFIX" != "/opt/greenbone" ]; then
-    sed -i "s|/opt/greenbone/gmp-relay.sh|$PREFIX/gmp-relay.sh|" "$PREFIX/gmp.sh"
+    sed -i "s|/opt/greenbone/gmp-relay.sh|$PREFIX/gmp-relay.sh|g" "$PREFIX/gmp.sh"
+    sed -i "s|/opt/greenbone/gmp.sh|$PREFIX/gmp.sh|g" "$PREFIX/gmp.sh"
     sed -i "s|GMP_ENV=\"\${GMP_ENV:-/opt/greenbone/.gmp.env}\"|GMP_ENV=\"\${GMP_ENV:-$PREFIX/.gmp.env}\"|" "$PREFIX/gmp-relay.sh"
-    echo "  rewrote the relay path in gmp.sh and GMP_ENV in gmp-relay.sh for PREFIX=$PREFIX"
+    echo "  rewrote paths in gmp.sh and GMP_ENV in gmp-relay.sh for PREFIX=$PREFIX"
+    # Verify BOTH rewrites. Checking only one leaves the other free to fail at runtime, where the
+    # symptom is sudo refusing an unlisted command or the relay not finding its credentials.
+    grep -q "exec sudo -n $PREFIX/gmp-relay.sh" "$PREFIX/gmp.sh" || {
+        echo "  ERROR: failed to rewrite the relay path in gmp.sh; sudo would refuse the command" >&2
+        exit 1
+    }
     grep -q "GMP_ENV:-$PREFIX/.gmp.env" "$PREFIX/gmp-relay.sh" || {
         echo "  ERROR: failed to rewrite GMP_ENV in gmp-relay.sh; the relay would not find its credentials" >&2
         exit 1
@@ -51,9 +60,8 @@ fi
 # Scoped sudo: one account, one command, no password. requiretty is disabled because the caller
 # arrives over SSH with no TTY.
 tmp="$(mktemp)"
-# env_reset and secure_path are distro defaults on Debian/Ubuntu but NOT sudo's compiled-in
-# behaviour, and this rule grants root. State them explicitly so the fragment does not depend on
-# whatever /etc/sudoers happens to contain.
+# env_reset is sudo's own default, but secure_path is a distro packaging choice, and this rule grants
+# root. State both explicitly so the fragment does not depend on what /etc/sudoers happens to contain.
 cat > "$tmp" <<SUDOERS
 Defaults:$SCAN_ACCOUNT !requiretty
 Defaults:$SCAN_ACCOUNT env_reset, secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
@@ -79,7 +87,7 @@ Next:
      Either GMP_USER/GMP_PASS or GMP_USERNAME/GMP_PASSWORD is accepted.
   2. Verify as root:
        echo '<get_version/>' | $PREFIX/gmp-relay.sh
-  3. Verify as the scan account (this is the path the Windows side uses):
+  3. Verify as the relay account (this is the path the Windows side uses):
        sudo -u $SCAN_ACCOUNT sh -c "echo '<get_version/>' | $PREFIX/gmp.sh"
      Expect: <get_version_response status="200">...
   4. Restrict the runner's key in ~$SCAN_ACCOUNT/.ssh/authorized_keys so a stolen key cannot get a
@@ -92,6 +100,13 @@ Next:
        echo '<get_version/>' | ssh -o BatchMode=yes $SCAN_ACCOUNT@THIS_HOST $PREFIX/gmp.sh
 
 If step 2 works but step 3 does not, the sudoers rule or the relay's permissions are wrong.
-If step 3 works but step 5 does not, it is the SSH key or known_hosts of the CALLING account --
-with BatchMode, ssh gives no prompt and exits 255 on an unknown host key.
+
+If step 3 works but step 5 does not, check in this order:
+  - "This account is currently not available." means $SCAN_ACCOUNT has a nologin shell. sshd runs
+    even a forced command through the login shell, and nologin ignores -c. Give it /bin/sh; the
+    forced command and no-pty are what prevent an interactive session.
+  - exit 255 with no prompt is the SSH key or known_hosts of the CALLING account, not this host.
+    Remember both belong to the account the scheduled task runs as, not to you.
+Note that step 3 uses sudo, which does NOT go through the login shell, so it passes even when a
+nologin shell would break step 5.
 NEXT

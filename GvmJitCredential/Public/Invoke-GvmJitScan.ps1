@@ -107,7 +107,7 @@ function Invoke-GvmJitScan {
         }
 
         if ($PSCmdlet.ParameterSetName -eq 'ByScanAction') {
-            Write-JitLog 'Running caller-supplied ScanAction' 1005 'Information' $LogSource
+            Write-JitLog 'Running caller-supplied ScanAction' 1021 'Information' $LogSource
             & $ScanAction $grant
             $result.Status = 'ScanActionCompleted'
         }

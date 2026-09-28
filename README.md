@@ -32,8 +32,9 @@ database holds a standing secret. A gMSA does not solve this particular problem,
 reason usually given — an authorised principal *can* retrieve `msDS-ManagedPassword`, so the runner
 could fetch it and hand it to Greenbone. The problem is what happens next: Greenbone stores that
 password, and a gMSA password stays valid for about 30 days, so you are back to a standing credential
-in the scanner database — the thing you were trying to avoid — and a gMSA cannot be disabled between
-scans without defeating the point of using one.
+in the scanner database — the thing you were trying to avoid. You could disable the gMSA between scans
+(`Set-ADServiceAccount -Enabled $false`), but then you are doing this module's job by hand and getting
+none of the benefit of AD-managed rotation.
 
 This reaches the same goal by other means: disable the account and rotate the password around each
 scan, rather than delegating password management to AD.
@@ -145,8 +146,9 @@ Neither password ever reaches a command line, which takes more care than it soun
   on the calling host.
 - `host/gmp.sh` is a world-readable **stub** that does nothing but `exec sudo -n gmp-relay.sh`.
 - `host/gmp-relay.sh` is root-owned `0700` and does the Docker work. `install.sh` writes a sudoers
-  rule letting the scan account run **that one command** and nothing else, so the SSH account never
-  needs docker-group membership — which on any Docker host is root-equivalent.
+  rule letting the **relay account** — the Linux account the runner SSHes in as, not the AD scan
+  account — run *that one command* and nothing else, so it never needs docker-group membership, which
+  on any Docker host is root-equivalent.
 - The relay writes the request and a `gvm-tools.conf` into a `mktemp` directory under **`/dev/shm`**
   — tmpfs, so neither is written to the filesystem, although tmpfs pages *can* be swapped, making this
   "off disk" only to the extent that swap is disabled or encrypted. Both are `0444` root-owned inside
@@ -229,7 +231,11 @@ claim support for a configuration you haven't run.
 
 # 2. Scanner host, AS ROOT. Create the Linux account the runner will SSH in as, install the
 #    stub + relay + scoped sudoers rule, then fill in the GMP credentials:
-#      useradd -r -m -s /usr/sbin/nologin gvm-relay
+#      useradd -r -m -s /bin/sh gvm-relay
+#    A REAL shell is required: sshd runs both the requested command and an authorized_keys
+#    forced command through the account's login shell, and /usr/sbin/nologin ignores -c and
+#    exits 1 with "This account is currently not available." The forced command plus no-pty
+#    below is what denies an interactive session, not the shell.
 #      SCAN_ACCOUNT=gvm-relay ./host/install.sh
 #      edit /opt/greenbone/.gmp.env  (chmod 600) — a DEDICATED low-privilege GMP user,
 #      which you create in Greenbone yourself; the bootstrap makes a credential, not a user.

@@ -38,10 +38,11 @@
 set -euo pipefail
 umask 077
 
-# This script runs as root via sudo from a less-privileged account. Do not rely on the invoking
-# sudoers configuration for hygiene: distro defaults (env_reset, secure_path) close the environment
-# and PATH injection paths, but they are packaging choices, not sudo's compiled-in behaviour.
-# Hardcode PATH so a caller-supplied one cannot substitute bash, stat, chmod, timeout or docker.
+# This script runs as root via sudo from a less-privileged account. env_reset IS sudo's own default,
+# so the caller's environment is normally stripped -- but secure_path is a distro packaging choice
+# rather than an upstream default, and without it env_reset preserves the caller's PATH. Hardcode
+# PATH so a caller-supplied one cannot substitute bash, stat, chmod, timeout or docker, regardless of
+# how the host's sudoers is configured.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 

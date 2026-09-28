@@ -7,7 +7,7 @@
   Invoke-GvmJitScan, while this script supplies the scan orchestration, because the host set changes
   between runs and so a fixed Greenbone task cannot represent it.
 
-A task cannot follow a changing inventory: GVM refuses to edit a target that is in use, and refuses
+  A task cannot follow a changing inventory: GVM refuses to edit a target that is in use, and refuses
   to retarget a task that has already run ("Status must be New to edit Target"). So when the host set
   CHANGES, this creates a fresh target and task.
 
