@@ -161,47 +161,30 @@ function Add-SortedCseGroup {
 $pdc = (Get-ADDomain).PDCEmulator
 $domainDn = (Get-ADDomain).DistinguishedName
 
-# Resolved from ACTIVE DIRECTORY first, not from NTAccount.Translate(). The Windows name-to-SID cache can
-# hand back the SID of a DELETED account when a name has been recreated, and a stale SID written into a
-# deny right denies nothing to nobody -- the rights would look correct in every report and protect no one.
-# Asking a DC for the object gives the current SID and its class in the same answer.
+# One query to a DC, which returns both the SID and the object class. This is the direct way to answer
+# "who is this and what are they" when the script is already talking to Active Directory -- and it avoids
+# NTAccount.Translate(), whose name-to-SID cache can return the SID of a DELETED account after a name has
+# been recreated. A stale SID in a deny right denies nothing to nobody while looking correct in a report.
 $samName = ($Identity -split '\')[-1]
 $adObj = Get-ADObject -Filter "sAMAccountName -eq '$samName'" -Server $pdc `
-            -Properties objectSid, objectClass, sAMAccountName -ErrorAction SilentlyContinue |
-         Select-Object -First 1
-if ($adObj) {
-    $sid = $adObj.objectSid.Value
-    $objClass = $adObj.objectClass
-    Write-Host "$Identity resolves to $sid (from $pdc, class '$objClass')"
+            -Properties objectSid, objectClass -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $adObj) {
+    throw "No object with sAMAccountName '$samName' on $pdc. Pass -Identity as DOMAIN
+ame for an account in this domain."
 }
-else {
-    # Not a plain sAMAccountName in this domain -- a UPN, or a principal from a trusted domain. Fall back
-    # to the local translation, then confirm the SID against the directory before trusting it.
-    $sid = (New-Object Security.Principal.NTAccount($Identity)).Translate(
-                [Security.Principal.SecurityIdentifier]).Value
-    Write-Host "$Identity resolves to $sid (via the local name cache; not found as a sAMAccountName here)"
-    $byId = Get-ADObject -Filter "objectSid -eq '$sid'" -Server $pdc -Properties objectClass -ErrorAction SilentlyContinue
-    $objClass = if ($byId) { $byId.objectClass } else { $null }
-}
+$sid = $adObj.objectSid.Value
+Write-Host "$Identity resolves to $sid (class '$($adObj.objectClass)', from $pdc)"
 
 if (-not $Force) {
     # A well-known SID (Everyone S-1-1-0, Administrators S-1-5-32-544, Authenticated Users S-1-5-11)
     # translates perfectly well from a name, and denying it these rights would be catastrophic across
     # every machine the GPO reaches. Domain SIDs only, and then only user objects.
-    if ($sid -notmatch '^S-1-5-21-') {
-        throw "$Identity resolves to the well-known SID $sid, not a domain account. Refusing (-Force overrides)."
+    if ($adObj.objectClass -ne 'user') {
+        throw ("$Identity is a '$($adObj.objectClass)', not a user. Denying these rights to a group, " +
+               'computer or managed service account has a blast radius nobody intends -- and a gMSA is ' +
+               'normally the RUNNER, which needs batch logon. Refusing (-Force overrides).')
     }
-    if (-not $objClass) {
-        throw ("No directory object on $pdc has the SID $sid. If this name was recently deleted and " +
-               'recreated, the local name cache may still be returning the SID of the deleted one -- and a ' +
-               'stale SID in a deny right protects nobody. Check with: Get-ADUser ' + $samName + ' | Select SID')
-    }
-    if ($objClass -ne 'user') {
-        throw ("$Identity is a '$objClass', not a user. Denying these rights to a group, computer or " +
-               'managed service account has a blast radius nobody intends -- and a gMSA is normally the ' +
-               'RUNNER, which needs batch logon. Refusing (-Force overrides).')
-    }
-    Write-Host "  confirmed: a domain user object on $pdc"
+    Write-Host '  confirmed: a domain user object'
 }
 
 # ---------------------------------------------------------------- the GPO
