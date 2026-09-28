@@ -19,6 +19,25 @@ It is a sample to read and adapt, taken from a deployment that runs weekly — n
 not reduce what the account can do *while* a scan is running; see [Threat model](#threat-model) and
 [Scope](#scope) for what it does and does not buy.
 
+> **Run this at your own risk, and read it before you do.** Provided as is, with no warranty and no
+> liability — see [LICENSE](LICENSE). That is not a formality here, because these scripts change live
+> directory and security state: they enable a domain account and rotate its password, author a Group
+> Policy Object in SYSVOL and can link it to an OU, edit local security policy through `secedit`, and
+> install a `sudoers` rule on the scanner. Two consequences are easy to walk into and worth knowing
+> before, not after:
+>
+> - **User rights do not merge across GPOs.** The highest-precedence GPO's membership list for a right
+>   replaces every other GPO's list for it. Linking a second GPO that sets these rights took an
+>   already-restricted account from 4 deny rights to 0 in testing.
+> - **User rights tattoo.** Unlinking or deleting a GPO does not hand the previous rights back; the
+>   values stay in each machine's local security database until something overwrites them.
+>
+> Test against something you can afford to break. The bootstrap scripts, the GPO sample and the
+> per-machine sample all support `-WhatIf`; use it first. The setup steps are the privileged ones — the
+> AD bootstrap and the GPO sample need directory rights amounting to Domain Admin in practice, and the
+> per-machine sample needs local administrator. The recurring grant and revoke do not: they run as the
+> runner account, with delegated permission over the one scan account and nothing else.
+
 ```powershell
 $grant = Grant-GvmScanCredential -Identity gvm-scan -CredentialId $cfg.CredentialId `
            -ScannerHost gvm-relay@scanner.example.local -GmpHelper /opt/greenbone/gmp.sh
