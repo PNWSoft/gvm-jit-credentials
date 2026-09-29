@@ -1,0 +1,25 @@
+# Keeps the pinned action SHAs current.
+#
+# The workflow pins third-party actions to a full commit SHA rather than a major tag, because a tag
+# like v7 is mutable: whoever controls the action's repository can repoint it at a different commit,
+# and a workflow that trusts a tag trusts whatever it points to at the moment it runs. For a sample
+# whose whole subject is not leaving credentials lying around, that is the consistent choice.
+#
+# The cost of pinning is that a pin does not update itself, so a security fix in the action never
+# arrives. This config pays that cost: Dependabot raises a PR when the pinned SHA falls behind, and
+# keeps the `# v7.0.1` comment next to it in step, so the pin stays both exact and legible.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+    # Grouped so a routine runtime bump is one PR to review rather than one per workflow step.
+    groups:
+      actions:
+        patterns:
+          - '*'

@@ -24,7 +24,7 @@ jobs:
       run:
         shell: ${{ matrix.shell }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Parse every script
         run: |
@@ -72,7 +72,7 @@ jobs:
     name: PSScriptAnalyzer
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
@@ -84,7 +84,7 @@ jobs:
     name: Hygiene (shellcheck, CRLF, no leaked config)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y shellcheck && shellcheck host/*.sh
