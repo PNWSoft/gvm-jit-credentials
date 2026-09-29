@@ -82,7 +82,15 @@ jobs:
 
   hygiene:
     name: Hygiene (shellcheck, CRLF, no leaked config)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`. GitHub migrates that label to Ubuntu 26 from 19 October 2026, and a
+    # label that changes underneath you turns an image upgrade into a surprise red build on a day nobody
+    # chose. The checks in this job lean on shellcheck's behaviour and on GNU grep, so the upgrade is
+    # worth making deliberately.
+    #
+    # Note this pin is NOT maintained by Dependabot: its github-actions ecosystem updates `uses:`
+    # versions, not runner labels. This one is on a human to move, so it is worth revisiting when the
+    # image goes out of support rather than leaving it indefinitely.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
